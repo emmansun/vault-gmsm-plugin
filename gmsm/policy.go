@@ -4,13 +4,18 @@ import (
 	"bytes"
 	"context"
 	"crypto/cipher"
+	"crypto/ecdsa"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/asn1"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"path"
 	"strconv"
 	"strings"
@@ -18,7 +23,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/emmansun/gmsm/sm2"
 	"github.com/emmansun/gmsm/sm4"
+	"github.com/emmansun/gmsm/smx509"
 	"github.com/hashicorp/errwrap"
 	uuid "github.com/hashicorp/go-uuid"
 	"github.com/hashicorp/vault/sdk/helper/errutil"
@@ -39,6 +46,7 @@ const (
 // Or this one...we need the default of zero to be the original SM4-GCM96
 const (
 	KeyType_SM4_GCM96 = iota
+	KeyType_ECDSA_SM2
 )
 
 type KeyData struct {
@@ -50,7 +58,7 @@ type KeyType int
 
 func (kt KeyType) EncryptionSupported() bool {
 	switch kt {
-	case KeyType_SM4_GCM96:
+	case KeyType_SM4_GCM96, KeyType_ECDSA_SM2:
 		return true
 	}
 	return false
@@ -58,17 +66,25 @@ func (kt KeyType) EncryptionSupported() bool {
 
 func (kt KeyType) DecryptionSupported() bool {
 	switch kt {
-	case KeyType_SM4_GCM96:
+	case KeyType_SM4_GCM96, KeyType_ECDSA_SM2:
 		return true
 	}
 	return false
 }
 
 func (kt KeyType) SigningSupported() bool {
+	switch kt {
+	case KeyType_ECDSA_SM2:
+		return true
+	}
 	return false
 }
 
 func (kt KeyType) HashSignatureInput() bool {
+	switch kt {
+	case KeyType_ECDSA_SM2:
+		return true
+	}
 	return false
 }
 
@@ -84,6 +100,8 @@ func (kt KeyType) String() string {
 	switch kt {
 	case KeyType_SM4_GCM96:
 		return "sm4-gcm96"
+	case KeyType_ECDSA_SM2:
+		return "ecdsa-sm2"
 	}
 	return "[unknown]"
 }
@@ -748,7 +766,17 @@ func (p *Policy) Encrypt(ver int, context, nonce []byte, value string) (string, 
 		if err != nil {
 			return "", err
 		}
-
+	case KeyType_ECDSA_SM2:
+		keyEntry, err := p.safeGetKeyEntry(ver)
+		if err != nil {
+			return "", err
+		}
+		key := &ecdsa.PublicKey{
+			Curve: sm2.P256(),
+			X:     keyEntry.EC_X,
+			Y:     keyEntry.EC_Y,
+		}
+		ciphertext, err = sm2.Encrypt(rand.Reader, key, plaintext, nil)
 	default:
 		return "", errutil.InternalError{Err: fmt.Sprintf("unsupported key type %v", p.Type)}
 	}
@@ -892,6 +920,28 @@ func (p *Policy) RotateInMemory(randReader io.Reader) (retErr error) {
 			return err
 		}
 		entry.Key = newKey
+
+	case KeyType_ECDSA_SM2:
+		privKey, err := sm2.GenerateKey(rand.Reader)
+		if err != nil {
+			return err
+		}
+		entry.EC_D = privKey.D
+		entry.EC_X = privKey.X
+		entry.EC_Y = privKey.Y
+		derBytes, err := smx509.MarshalPKIXPublicKey(privKey.Public())
+		if err != nil {
+			return errwrap.Wrapf("error marshaling public key: {{err}}", err)
+		}
+		pemBlock := &pem.Block{
+			Type:  "PUBLIC KEY",
+			Bytes: derBytes,
+		}
+		pemBytes := pem.EncodeToMemory(pemBlock)
+		if pemBytes == nil || len(pemBytes) == 0 {
+			return fmt.Errorf("error PEM-encoding public key")
+		}
+		entry.FormattedPublicKey = string(pemBytes)
 	}
 
 	if p.ConvergentEncryption {
@@ -1090,7 +1140,24 @@ func (p *Policy) Decrypt(context, nonce []byte, value string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-
+	case KeyType_ECDSA_SM2:
+		keyEntry, err := p.safeGetKeyEntry(ver)
+		if err != nil {
+			return "", err
+		}
+		key := &sm2.PrivateKey{ecdsa.PrivateKey{
+			PublicKey: ecdsa.PublicKey{
+				Curve: sm2.P256(),
+				X:     keyEntry.EC_X,
+				Y:     keyEntry.EC_Y,
+			},
+			D: keyEntry.EC_D,
+		},
+		}
+		plain, err = sm2.Decrypt(key, decoded)
+		if err != nil {
+			return "", err
+		}
 	default:
 		return "", errutil.InternalError{Err: fmt.Sprintf("unsupported key type %v", p.Type)}
 	}
@@ -1139,4 +1206,192 @@ func (p *Policy) SymmetricDecryptRaw(encKey, ciphertext []byte, opts SymmetricOp
 		return nil, err
 	}
 	return plain, nil
+}
+
+type ecdsaSignature struct {
+	R, S *big.Int
+}
+
+func (p *Policy) Sign(ver int, input []byte, marshaling keysutil.MarshalingType) (*keysutil.SigningResult, error) {
+	if !p.Type.SigningSupported() {
+		return nil, fmt.Errorf("message signing not supported for key type %v", p.Type)
+	}
+
+	switch {
+	case ver == 0:
+		ver = p.LatestVersion
+	case ver < 0:
+		return nil, errutil.UserError{Err: "requested version for signing is negative"}
+	case ver > p.LatestVersion:
+		return nil, errutil.UserError{Err: "requested version for signing is higher than the latest key version"}
+	case p.MinEncryptionVersion > 0 && ver < p.MinEncryptionVersion:
+		return nil, errutil.UserError{Err: "requested version for signing is less than the minimum encryption key version"}
+	}
+
+	var sig []byte
+	var pubKey []byte
+	var err error
+	keyParams, err := p.safeGetKeyEntry(ver)
+	if err != nil {
+		return nil, err
+	}
+
+	switch p.Type {
+	case KeyType_ECDSA_SM2:
+		var curveBits int = 256
+		key := &sm2.PrivateKey{ecdsa.PrivateKey{
+			PublicKey: ecdsa.PublicKey{
+				Curve: sm2.P256(),
+				X:     keyParams.EC_X,
+				Y:     keyParams.EC_Y,
+			},
+			D: keyParams.EC_D,
+		},
+		}
+
+		r, s, err := sm2.Sign(rand.Reader, &key.PrivateKey, input)
+		if err != nil {
+			return nil, err
+		}
+
+		switch marshaling {
+		case keysutil.MarshalingTypeASN1:
+			// This is used by openssl and X.509
+			sig, err = asn1.Marshal(ecdsaSignature{
+				R: r,
+				S: s,
+			})
+			if err != nil {
+				return nil, err
+			}
+
+		case keysutil.MarshalingTypeJWS:
+			// This is used by JWS
+
+			// First we have to get the length of the curve in bytes. Although
+			// we only support 256 now, we'll do this in an agnostic way so we
+			// can reuse this marshaling if we support e.g. 521. Getting the
+			// number of bytes without rounding up would be 65.125 so we need
+			// to add one in that case.
+			keyLen := curveBits / 8
+			if curveBits%8 > 0 {
+				keyLen++
+			}
+
+			// Now create the output array
+			sig = make([]byte, keyLen*2)
+			rb := r.Bytes()
+			sb := s.Bytes()
+			copy(sig[keyLen-len(rb):], rb)
+			copy(sig[2*keyLen-len(sb):], sb)
+
+		default:
+			return nil, errutil.UserError{Err: "requested marshaling type is invalid"}
+		}
+
+	default:
+		return nil, fmt.Errorf("unsupported key type %v", p.Type)
+	}
+
+	// Convert to base64
+	var encoded string
+	switch marshaling {
+	case keysutil.MarshalingTypeASN1:
+		encoded = base64.StdEncoding.EncodeToString(sig)
+	case keysutil.MarshalingTypeJWS:
+		encoded = base64.RawURLEncoding.EncodeToString(sig)
+	}
+	res := &keysutil.SigningResult{
+		Signature: p.getVersionPrefix(ver) + encoded,
+		PublicKey: pubKey,
+	}
+
+	return res, nil
+}
+
+func (p *Policy) VerifySignature(input []byte, marshaling keysutil.MarshalingType, sig string) (bool, error) {
+	if !p.Type.SigningSupported() {
+		return false, errutil.UserError{Err: fmt.Sprintf("message verification not supported for key type %v", p.Type)}
+	}
+
+	tplParts, err := p.getTemplateParts()
+	if err != nil {
+		return false, err
+	}
+
+	// Verify the prefix
+	if !strings.HasPrefix(sig, tplParts[0]) {
+		return false, errutil.UserError{Err: "invalid signature: no prefix"}
+	}
+
+	splitVerSig := strings.SplitN(strings.TrimPrefix(sig, tplParts[0]), tplParts[1], 2)
+	if len(splitVerSig) != 2 {
+		return false, errutil.UserError{Err: "invalid signature: wrong number of fields"}
+	}
+
+	ver, err := strconv.Atoi(splitVerSig[0])
+	if err != nil {
+		return false, errutil.UserError{Err: "invalid signature: version number could not be decoded"}
+	}
+
+	if ver > p.LatestVersion {
+		return false, errutil.UserError{Err: "invalid signature: version is too new"}
+	}
+
+	if p.MinDecryptionVersion > 0 && ver < p.MinDecryptionVersion {
+		return false, errutil.UserError{Err: keysutil.ErrTooOld}
+	}
+
+	var sigBytes []byte
+	switch marshaling {
+	case keysutil.MarshalingTypeASN1:
+		sigBytes, err = base64.StdEncoding.DecodeString(splitVerSig[1])
+	case keysutil.MarshalingTypeJWS:
+		sigBytes, err = base64.RawURLEncoding.DecodeString(splitVerSig[1])
+	default:
+		return false, errutil.UserError{Err: "requested marshaling type is invalid"}
+	}
+	if err != nil {
+		return false, errutil.UserError{Err: "invalid base64 signature value"}
+	}
+
+	switch p.Type {
+	case KeyType_ECDSA_SM2:
+		var ecdsaSig ecdsaSignature
+
+		switch marshaling {
+		case keysutil.MarshalingTypeASN1:
+			rest, err := asn1.Unmarshal(sigBytes, &ecdsaSig)
+			if err != nil {
+				return false, errutil.UserError{Err: "supplied signature is invalid"}
+			}
+			if rest != nil && len(rest) != 0 {
+				return false, errutil.UserError{Err: "supplied signature contains extra data"}
+			}
+
+		case keysutil.MarshalingTypeJWS:
+			paramLen := len(sigBytes) / 2
+			rb := sigBytes[:paramLen]
+			sb := sigBytes[paramLen:]
+			ecdsaSig.R = new(big.Int)
+			ecdsaSig.R.SetBytes(rb)
+			ecdsaSig.S = new(big.Int)
+			ecdsaSig.S.SetBytes(sb)
+		}
+
+		keyParams, err := p.safeGetKeyEntry(ver)
+		if err != nil {
+			return false, err
+		}
+		key := &ecdsa.PublicKey{
+			Curve: sm2.P256(),
+			X:     keyParams.EC_X,
+			Y:     keyParams.EC_Y,
+		}
+
+		return ecdsa.Verify(key, input, ecdsaSig.R, ecdsaSig.S), nil
+
+	default:
+		return false, errutil.InternalError{Err: fmt.Sprintf("unsupported key type %v", p.Type)}
+	}
 }

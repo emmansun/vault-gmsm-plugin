@@ -335,6 +335,12 @@ func (lm *LockManager) GetPolicy(ctx context.Context, req PolicyRequest, rand io
 				return nil, false, fmt.Errorf("convergent encryption requires derivation to be enabled")
 			}
 
+		case KeyType_ECDSA_SM2:
+			if req.Derived || req.Convergent {
+				cleanup()
+				return nil, false, fmt.Errorf("key derivation and convergent encryption not supported for keys of type %v", req.KeyType)
+			}
+
 		default:
 			cleanup()
 			return nil, false, fmt.Errorf("unsupported key type %v", req.KeyType)

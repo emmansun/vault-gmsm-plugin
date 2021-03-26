@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/emmansun/gmsm/sm2"
+	"github.com/fatih/structs"
 	"github.com/hashicorp/vault/sdk/framework"
 	"github.com/hashicorp/vault/sdk/helper/keysutil"
 	"github.com/hashicorp/vault/sdk/logical"
@@ -36,7 +38,8 @@ func (b *backend) pathKeys() *framework.Path {
 				Type:    framework.TypeString,
 				Default: "sm4-gcm96",
 				Description: `
-The type of key to create. Currently, "sm4-gcm96" (symmetric) is supported.  Defaults to "sm4-gcm96".
+The type of key to create. Currently, "sm4-gcm96" (symmetric), "ecdsa-sm2"
+(asymmetric) are supported.  Defaults to "sm4-gcm96".
 `,
 			},
 
@@ -130,6 +133,8 @@ func (b *backend) pathPolicyWrite(ctx context.Context, req *logical.Request, d *
 	switch keyType {
 	case "sm4-gcm96":
 		polReq.KeyType = KeyType_SM4_GCM96
+	case "ecdsa-sm2":
+		polReq.KeyType = KeyType_ECDSA_SM2
 	default:
 		return logical.ErrorResponse(fmt.Sprintf("unknown key type %v", keyType)), logical.ErrInvalidRequest
 	}
@@ -232,6 +237,23 @@ func (b *backend) pathPolicyRead(ctx context.Context, req *logical.Request, d *f
 			retKeys[k] = v.DeprecatedCreationTime
 		}
 		resp.Data["keys"] = retKeys
+
+	case KeyType_ECDSA_SM2:
+		retKeys := map[string]map[string]interface{}{}
+		for k, v := range p.Keys {
+			key := asymKey{
+				PublicKey:    v.FormattedPublicKey,
+				CreationTime: v.CreationTime,
+			}
+			if key.CreationTime.IsZero() {
+				key.CreationTime = time.Unix(v.DeprecatedCreationTime, 0)
+			}
+
+			key.Name = sm2.P256().Params().Name
+			retKeys[k] = structs.New(key).Map()
+		}
+		resp.Data["keys"] = retKeys
+
 	}
 
 	return resp, nil
