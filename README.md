@@ -1,6 +1,7 @@
 # Vault plugin: GMSM
 
-Only **sm4_gcm96** is supported now, SM4-GCM with a 128-bit SM4 key and a 96-bit nonce; supports encryption, decryption, key derivation, and convergent encryption.
+1. **sm4_gcm96** is supported now, SM4-GCM with a 128-bit SM4 key and a 96-bit nonce; supports encryption, decryption, key derivation, and convergent encryption.
+2. **ecdsa-sm2** is also supported, this key type can be used for encryption/decryption, sign/verify.
 
 #### Run development mode on windows
 
