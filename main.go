@@ -3,7 +3,8 @@ package main
 import (
 	"log"
 	"os"
-	"vault-gmsm-plugin/gmsm"
+
+	"github.com/emmansun/vault-gmsm-plugin/gmsm"
 
 	"github.com/hashicorp/vault/api"
 	"github.com/hashicorp/vault/sdk/plugin"
