@@ -1239,15 +1239,13 @@ func (p *Policy) Sign(ver int, input []byte, marshaling keysutil.MarshalingType)
 	switch p.Type {
 	case KeyType_ECDSA_SM2:
 		var curveBits int = 256
-		key := &sm2.PrivateKey{ecdsa.PrivateKey{
-			PublicKey: ecdsa.PublicKey{
-				Curve: sm2.P256(),
-				X:     keyParams.EC_X,
-				Y:     keyParams.EC_Y,
-			},
-			D: keyParams.EC_D,
-		},
+		key := new(sm2.PrivateKey)
+		key.PublicKey = ecdsa.PublicKey{
+			Curve: sm2.P256(),
+			X:     keyParams.EC_X,
+			Y:     keyParams.EC_Y,
 		}
+		key.D = keyParams.EC_D
 
 		r, s, err := sm2.Sign(rand.Reader, &key.PrivateKey, input)
 		if err != nil {
@@ -1389,7 +1387,7 @@ func (p *Policy) VerifySignature(input []byte, marshaling keysutil.MarshalingTyp
 			Y:     keyParams.EC_Y,
 		}
 
-		return ecdsa.Verify(key, input, ecdsaSig.R, ecdsaSig.S), nil
+		return sm2.Verify(key, input, ecdsaSig.R, ecdsaSig.S), nil
 
 	default:
 		return false, errutil.InternalError{Err: fmt.Sprintf("unsupported key type %v", p.Type)}

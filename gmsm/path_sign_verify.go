@@ -62,7 +62,7 @@ type batchResponseVerifyItem struct {
 
 func (b *backend) pathSign() *framework.Path {
 	return &framework.Path{
-		Pattern: "sign/" + framework.GenericNameRegex("name") + framework.OptionalParamRegex("urlalgorithm"),
+		Pattern: "sign/" + framework.GenericNameRegex("name"),
 		Fields: map[string]*framework.FieldSchema{
 			"name": {
 				Type:        framework.TypeString,
@@ -72,11 +72,6 @@ func (b *backend) pathSign() *framework.Path {
 			"input": {
 				Type:        framework.TypeString,
 				Description: "The base64-encoded input data",
-			},
-
-			"urlalgorithm": {
-				Type:        framework.TypeString,
-				Description: `Hash algorithm to use (POST URL parameter)`,
 			},
 
 			"key_version": {
@@ -109,7 +104,7 @@ to the min_encryption_version configured on the key.`,
 
 func (b *backend) pathVerify() *framework.Path {
 	return &framework.Path{
-		Pattern: "verify/" + framework.GenericNameRegex("name") + framework.OptionalParamRegex("urlalgorithm"),
+		Pattern: "verify/" + framework.GenericNameRegex("name"),
 		Fields: map[string]*framework.FieldSchema{
 			"name": &framework.FieldSchema{
 				Type:        framework.TypeString,
@@ -124,11 +119,6 @@ func (b *backend) pathVerify() *framework.Path {
 			"input": {
 				Type:        framework.TypeString,
 				Description: "The base64-encoded input data to verify",
-			},
-
-			"urlalgorithm": {
-				Type:        framework.TypeString,
-				Description: `Hash algorithm to use (POST URL parameter)`,
 			},
 
 			"prehashed": {
@@ -201,8 +191,7 @@ func (b *backend) pathSignWrite(ctx context.Context, req *logical.Request, d *fr
 		// use empty string if input is missing - not an error
 		batchInputItems = make([]batchRequestSignItem, 1)
 		batchInputItems[0] = batchRequestSignItem{
-			"input":   d.Get("input").(string),
-			"context": d.Get("context").(string),
+			"input": d.Get("input").(string),
 		}
 	}
 
@@ -303,7 +292,6 @@ func (b *backend) pathVerifyWrite(ctx context.Context, req *logical.Request, d *
 		if sig, ok := d.GetOk("signature"); ok {
 			batchInputItems[0]["signature"] = sig.(string)
 		}
-		batchInputItems[0]["context"] = d.Get("context").(string)
 	}
 
 	// For simplicity, 'signature' and 'hmac' cannot be mixed across batch_input elements.
@@ -331,18 +319,6 @@ func (b *backend) pathVerifyWrite(ctx context.Context, req *logical.Request, d *
 	}
 
 	name := d.Get("name").(string)
-	hashAlgorithmStr := d.Get("urlalgorithm").(string)
-	if hashAlgorithmStr == "" {
-		hashAlgorithmStr = d.Get("hash_algorithm").(string)
-		if hashAlgorithmStr == "" {
-			hashAlgorithmStr = d.Get("algorithm").(string)
-		}
-	}
-
-	hashAlgorithm, ok := keysutil.HashTypeMap[hashAlgorithmStr]
-	if !ok {
-		return logical.ErrorResponse(fmt.Sprintf("invalid hash algorithm %q", hashAlgorithmStr)), logical.ErrInvalidRequest
-	}
 
 	marshalingStr := d.Get("marshaling_algorithm").(string)
 	marshaling, ok := keysutil.MarshalingTypeMap[marshalingStr]
@@ -398,7 +374,7 @@ func (b *backend) pathVerifyWrite(ctx context.Context, req *logical.Request, d *
 		}
 
 		if p.Type.HashSignatureInput() && !prehashed {
-			hf := keysutil.HashFuncMap[hashAlgorithm]()
+			hf := sm3.New()
 			hf.Write(input)
 			input = hf.Sum(nil)
 		}
@@ -446,10 +422,10 @@ func (b *backend) pathVerifyWrite(ctx context.Context, req *logical.Request, d *
 const pathSignHelpSyn = `Generate a signature for input data using the named key`
 
 const pathSignHelpDesc = `
-Generates a signature of the input data using the named key and the given hash algorithm.
+Generates a signature of the input data using the named key and SM3 hash algorithm.
 `
 const pathVerifyHelpSyn = `Verify a signature or HMAC for input data created using the named key`
 
 const pathVerifyHelpDesc = `
-Verifies a signature or HMAC of the input data using the named key and the given hash algorithm.
+Verifies a signature or HMAC of the input data using the named key and SM3 hash algorithm.
 `

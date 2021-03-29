@@ -18,4 +18,16 @@
 9. Rotate, `vault write -f gmsm/keys/mykey/rotate`
 10. Rewrap, `vault write -f gmsm/rewrap/mykey ciphertext=vault:v1:UY653qxNcU5PZQT1QxRHHW7osP7B/jGMQgZZT2xvAnBb8yPoQuwwPrHH`
 
-![test](./test.png)
+![test](./images/test.png)
+
+#### **ecdsa-sm2**
+
+- Create key: `vault write -f gmsm/keys/sm2-key type=ecdsa-sm2`
+  `Success! Data written to: gmsm/keys/sm2-key`   
+- Encryption: ![](./images/image-20210329110630282.png)
+- Decryption: ![](./images/image-20210329110725901.png)
+- Read key:     ![image-20210329110813278](./images/image-20210329110813278.png)
+
+- Sign:             ![image-20210329134936146](./images/image-20210329134936146.png)
+
+- Verify:           ![image-20210329140556569](./images/image-20210329140556569.png)
