@@ -114,7 +114,7 @@ func (b *backend) pathRewrapWrite(ctx context.Context, req *logical.Request, d *
 	}
 
 	// Get the policy
-	p, _, err := b.lm.GetPolicy(ctx, PolicyRequest{
+	p, _, err := b.GetPolicy(ctx, PolicyRequest{
 		Storage: req.Storage,
 		Name:    d.Get("name").(string),
 	}, b.GetRandomReader())

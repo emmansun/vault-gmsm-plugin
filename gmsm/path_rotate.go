@@ -11,7 +11,7 @@ func (b *backend) pathRotate() *framework.Path {
 	return &framework.Path{
 		Pattern: "keys/" + framework.GenericNameRegex("name") + "/rotate",
 		Fields: map[string]*framework.FieldSchema{
-			"name": &framework.FieldSchema{
+			"name": {
 				Type:        framework.TypeString,
 				Description: "Name of the key",
 			},
@@ -30,7 +30,7 @@ func (b *backend) pathRotateWrite(ctx context.Context, req *logical.Request, d *
 	name := d.Get("name").(string)
 
 	// Get the policy
-	p, _, err := b.lm.GetPolicy(ctx, PolicyRequest{
+	p, _, err := b.GetPolicy(ctx, PolicyRequest{
 		Storage: req.Storage,
 		Name:    name,
 	}, b.GetRandomReader())

@@ -106,7 +106,7 @@ func (b *backend) pathVerify() *framework.Path {
 	return &framework.Path{
 		Pattern: "verify/" + framework.GenericNameRegex("name"),
 		Fields: map[string]*framework.FieldSchema{
-			"name": &framework.FieldSchema{
+			"name": {
 				Type:        framework.TypeString,
 				Description: "The key to use",
 			},
@@ -155,7 +155,7 @@ func (b *backend) pathSignWrite(ctx context.Context, req *logical.Request, d *fr
 	prehashed := d.Get("prehashed").(bool)
 
 	// Get the policy
-	p, _, err := b.lm.GetPolicy(ctx, PolicyRequest{
+	p, _, err := b.GetPolicy(ctx, PolicyRequest{
 		Storage: req.Storage,
 		Name:    name,
 	}, b.GetRandomReader())
@@ -329,7 +329,7 @@ func (b *backend) pathVerifyWrite(ctx context.Context, req *logical.Request, d *
 	prehashed := d.Get("prehashed").(bool)
 
 	// Get the policy
-	p, _, err := b.lm.GetPolicy(ctx, PolicyRequest{
+	p, _, err := b.GetPolicy(ctx, PolicyRequest{
 		Storage: req.Storage,
 		Name:    name,
 	}, b.GetRandomReader())
