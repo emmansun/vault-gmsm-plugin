@@ -2,6 +2,8 @@ package gmsm
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/sha512"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
@@ -26,6 +28,10 @@ func (b *backend) pathHash() *framework.Path {
 				Default: "sm3",
 				Description: `Algorithm to use (POST body parameter). Valid values are:
 * sm3
+* sha2-224
+* sha2-256
+* sha2-384
+* sha2-512
 Defaults to "sm3".`,
 			},
 
@@ -74,6 +80,14 @@ func (b *backend) pathHashWrite(ctx context.Context, req *logical.Request, d *fr
 	switch algorithm {
 	case "sm3":
 		hf = sm3.New()
+	case "sha2-224":
+		hf = sha256.New224()
+	case "sha2-256":
+		hf = sha256.New()
+	case "sha2-384":
+		hf = sha512.New384()
+	case "sha2-512":
+		hf = sha512.New()
 	default:
 		return logical.ErrorResponse(fmt.Sprintf("unsupported algorithm %s", algorithm)), nil
 	}
