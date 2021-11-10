@@ -1,5 +1,7 @@
 # Vault plugin: GMSM
 
+[![Documentation](https://godoc.org/github.com/emmansun/vault-gmsm-plugin?status.svg)](https://godoc.org/github.com/emmansun/vault-gmsm-plugin) [![Release](https://img.shields.io/github/release/emmansun/vault-gmsm-plugin/all.svg)](https://github.com/emmansun/vault-gmsm-plugin/releases)
+
 1. **sm4_gcm96** is supported now, SM4-GCM with a 128-bit SM4 key and a 96-bit nonce; supports encryption, decryption, key derivation, and convergent encryption.
 2. **ecdsa-sm2** is also supported, this key type can be used for encryption/decryption, sign/verify.
 
@@ -22,7 +24,7 @@
 
 #### **ecdsa-sm2**
 
-- Create key: `vault write -f gmsm/keys/sm2-key type=ecdsa-sm2`
+- Create key: `vault write -f gmsm/keys/sm2-key type=ecdsa-sm2`  
   `Success! Data written to: gmsm/keys/sm2-key`   
 - Encryption: ![](./images/image-20210329110630282.png)
 - Decryption: ![](./images/image-20210329110725901.png)
