@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/emmansun/gmsm/sm2"
+	"github.com/emmansun/gmsm/smx509"
 	"github.com/hashicorp/vault/sdk/framework"
 	"github.com/hashicorp/vault/sdk/helper/keysutil"
 	"github.com/hashicorp/vault/sdk/logical"
@@ -157,8 +159,19 @@ func getExportKey(policy *Policy, key *keysutil.KeyEntry, exportType string) (st
 		switch policy.Type {
 		case KeyType_SM4_GCM96:
 			return strings.TrimSpace(base64.StdEncoding.EncodeToString(key.Key)), nil
-
+		case KeyType_ECDSA_SM2:
+			ecKey, err := keyEntryToECPrivateKey(key, sm2.P256())
+			if err != nil {
+				return "", err
+			}
+			return ecKey, nil
 		}
+	case exportTypeSigningKey:
+		ecKey, err := keyEntryToECPrivateKey(key, sm2.P256())
+		if err != nil {
+			return "", err
+		}
+		return ecKey, nil
 	}
 
 	return "", fmt.Errorf("unknown key type %v", policy.Type)
@@ -189,7 +202,7 @@ func keyEntryToECPrivateKey(k *keysutil.KeyEntry, curve elliptic.Curve) (string,
 		},
 		D: k.EC_D,
 	}
-	ecder, err := x509.MarshalECPrivateKey(privKey)
+	ecder, err := smx509.MarshalECPrivateKey(privKey)
 	if err != nil {
 		return "", err
 	}

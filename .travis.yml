@@ -1,0 +1,18 @@
+language: go
+
+go:
+  - "1.15.x"
+  - "1.16.x"
+  - "1.17.x"
+
+sudo: false
+
+os:
+  - linux
+ 
+install:
+  - go mod tidy
+  - go mod download
+
+script:
+  - go test -v ./...
