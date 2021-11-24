@@ -1,11 +1,11 @@
 package main
 
 import (
-	"log"
 	"os"
 
 	"github.com/emmansun/vault-gmsm-plugin/gmsm"
 
+	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/vault/api"
 	"github.com/hashicorp/vault/sdk/plugin"
 )
@@ -23,7 +23,8 @@ func main() {
 		TLSProviderFunc:    tlsProviderFunc,
 	})
 	if err != nil {
-		log.Println(err)
+		logger := hclog.New(&hclog.LoggerOptions{Name: "gmsm"})
+		logger.Error("plugin shutting down", "error", err)
 		os.Exit(1)
 	}
 }
