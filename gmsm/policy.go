@@ -1145,14 +1145,9 @@ func (p *Policy) Decrypt(context, nonce []byte, value string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		key := &sm2.PrivateKey{ecdsa.PrivateKey{
-			PublicKey: ecdsa.PublicKey{
-				Curve: sm2.P256(),
-				X:     keyEntry.EC_X,
-				Y:     keyEntry.EC_Y,
-			},
-			D: keyEntry.EC_D,
-		},
+		key, err := sm2.NewPrivateKeyFromInt(keyEntry.EC_D)
+		if err != nil {
+			return "", err
 		}
 		plain, err = sm2.Decrypt(key, decoded)
 		if err != nil {
