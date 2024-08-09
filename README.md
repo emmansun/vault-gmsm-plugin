@@ -16,12 +16,13 @@
 4. Set environment variables: 
    - set VAULT_ADDR=http://127.0.0.1:8200 
    - set VAULT_TOKEN=root
-5. Enable the plugin `vault secrets enable -path=gmsm vault-gmsm-plugin.exe`
-6. Create one test key `vault write -f gmsm/keys/mykey`
-7. Use the key to encrypt `vault write gmsm/encrypt/mykey plaintext=bXkgc2VjcmV0IGRhdGE=`
-8. Use the key to decrypt `vault write gmsm/decrypt/mykey ciphertext=vault:v1:UY653qxNcU5PZQT1QxRHHW7osP7B/jGMQgZZT2xvAnBb8yPoQuwwPrHH`
-9. Rotate, `vault write -f gmsm/keys/mykey/rotate`
-10. Rewrap, `vault write -f gmsm/rewrap/mykey ciphertext=vault:v1:UY653qxNcU5PZQT1QxRHHW7osP7B/jGMQgZZT2xvAnBb8yPoQuwwPrHH`
+5. Register the plugin `vault plugin register -sha256=0cc95756eda21c9f5d5a2aa272804a68eaa343ef5a6ad5463b3ed423f52eadcf secret vault-gmsm-plugin.exe`，这里的hash值来自plugin.sha256sum   
+6. Enable the plugin `vault secrets enable -path=gmsm vault-gmsm-plugin.exe`
+7. Create one test key `vault write -f gmsm/keys/mykey`
+8. Use the key to encrypt `vault write gmsm/encrypt/mykey plaintext=bXkgc2VjcmV0IGRhdGE=`
+9. Use the key to decrypt `vault write gmsm/decrypt/mykey ciphertext=vault:v1:UY653qxNcU5PZQT1QxRHHW7osP7B/jGMQgZZT2xvAnBb8yPoQuwwPrHH`
+10. Rotate, `vault write -f gmsm/keys/mykey/rotate`
+11. Rewrap, `vault write -f gmsm/rewrap/mykey ciphertext=vault:v1:UY653qxNcU5PZQT1QxRHHW7osP7B/jGMQgZZT2xvAnBb8yPoQuwwPrHH`
 
 ![sm4 sample](./images/test.png)
 
