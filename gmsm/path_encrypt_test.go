@@ -3,6 +3,7 @@ package gmsm
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"reflect"
 	"strings"
 	"testing"
@@ -10,6 +11,71 @@ import (
 	"github.com/hashicorp/vault/sdk/logical"
 	"github.com/mitchellh/mapstructure"
 )
+
+func TestTransit_MissingPlaintext(t *testing.T) {
+	var resp *logical.Response
+	var err error
+
+	b, s := createBackendWithStorage(t)
+
+	// Create the policy
+	policyReq := &logical.Request{
+		Operation: logical.UpdateOperation,
+		Path:      "keys/existing_key",
+		Storage:   s,
+	}
+	resp, err = b.HandleRequest(context.Background(), policyReq)
+	if err != nil || (resp != nil && resp.IsError()) {
+		t.Fatalf("err:%v resp:%#v", err, resp)
+	}
+
+	encReq := &logical.Request{
+		Operation: logical.UpdateOperation,
+		Path:      "encrypt/existing_key",
+		Storage:   s,
+		Data:      map[string]interface{}{},
+	}
+	resp, err = b.HandleRequest(context.Background(), encReq)
+	if resp == nil || !resp.IsError() {
+		t.Fatalf("expected error due to missing plaintext in request, err:%v resp:%#v", err, resp)
+	}
+}
+
+func TestTransit_MissingPlaintextInBatchInput(t *testing.T) {
+	var resp *logical.Response
+	var err error
+
+	b, s := createBackendWithStorage(t)
+
+	// Create the policy
+	policyReq := &logical.Request{
+		Operation: logical.UpdateOperation,
+		Path:      "keys/existing_key",
+		Storage:   s,
+	}
+	resp, err = b.HandleRequest(context.Background(), policyReq)
+	if err != nil || (resp != nil && resp.IsError()) {
+		t.Fatalf("err:%v resp:%#v", err, resp)
+	}
+
+	batchInput := []interface{}{
+		map[string]interface{}{}, // Note that there is no map entry for plaintext
+	}
+
+	batchData := map[string]interface{}{
+		"batch_input": batchInput,
+	}
+	batchReq := &logical.Request{
+		Operation: logical.CreateOperation,
+		Path:      "encrypt/upserted_key",
+		Storage:   s,
+		Data:      batchData,
+	}
+	resp, err = b.HandleRequest(context.Background(), batchReq)
+	if err == nil {
+		t.Fatalf("expected error due to missing plaintext in request, err:%v resp:%#v", err, resp)
+	}
+}
 
 // Case1: Ensure that batch encryption did not affect the normal flow of
 // encrypting the plaintext with a pre-existing key.
@@ -577,13 +643,114 @@ func TestTransit_BatchEncryptionCase12(t *testing.T) {
 	}
 }
 
+// Case13: Incorrect input for nonce when we aren't in convergent encryption should fail the operation
+func TestTransit_EncryptionCase13(t *testing.T) {
+	var err error
+
+	b, s := createBackendWithStorage(t)
+
+	// Non-batch first
+	data := map[string]interface{}{"plaintext": "bXkgc2VjcmV0IGRhdGE=", "nonce": "R80hr9eNUIuFV52e"}
+	req := &logical.Request{
+		Operation: logical.CreateOperation,
+		Path:      "encrypt/my-key",
+		Storage:   s,
+		Data:      data,
+	}
+	resp, err := b.HandleRequest(context.Background(), req)
+	if err == nil {
+		t.Fatal("expected invalid request")
+	}
+
+	batchInput := []interface{}{
+		map[string]interface{}{"plaintext": "bXkgc2VjcmV0IGRhdGE=", "nonce": "R80hr9eNUIuFV52e"},
+	}
+
+	batchData := map[string]interface{}{
+		"batch_input": batchInput,
+	}
+	batchReq := &logical.Request{
+		Operation: logical.CreateOperation,
+		Path:      "encrypt/my-key",
+		Storage:   s,
+		Data:      batchData,
+	}
+	resp, err = b.HandleRequest(context.Background(), batchReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if v, ok := resp.Data["http_status_code"]; !ok || v.(int) != http.StatusBadRequest {
+		t.Fatal("expected request error")
+	}
+}
+
+// Case14: Incorrect input for nonce when we are in convergent version 3 should fail
+func TestTransit_EncryptionCase14(t *testing.T) {
+	var err error
+
+	b, s := createBackendWithStorage(t)
+
+	cReq := &logical.Request{
+		Operation: logical.UpdateOperation,
+		Path:      "keys/my-key",
+		Storage:   s,
+		Data: map[string]interface{}{
+			"convergent_encryption": "true",
+			"derived":               "true",
+		},
+	}
+	resp, err := b.HandleRequest(context.Background(), cReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Non-batch first
+	data := map[string]interface{}{"plaintext": "bXkgc2VjcmV0IGRhdGE=", "context": "SGVsbG8sIFdvcmxkCg==", "nonce": "R80hr9eNUIuFV52e"}
+	req := &logical.Request{
+		Operation: logical.CreateOperation,
+		Path:      "encrypt/my-key",
+		Storage:   s,
+		Data:      data,
+	}
+
+	resp, err = b.HandleRequest(context.Background(), req)
+	if err == nil {
+		t.Fatal("expected invalid request")
+	}
+
+	batchInput := []interface{}{
+		data,
+	}
+
+	batchData := map[string]interface{}{
+		"batch_input": batchInput,
+	}
+	batchReq := &logical.Request{
+		Operation: logical.CreateOperation,
+		Path:      "encrypt/my-key",
+		Storage:   s,
+		Data:      batchData,
+	}
+	resp, err = b.HandleRequest(context.Background(), batchReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if v, ok := resp.Data["http_status_code"]; !ok || v.(int) != http.StatusBadRequest {
+		t.Fatal("expected request error")
+	}
+}
+
 // Test that the fast path function decodeBatchRequestItems behave like mapstructure.Decode() to decode []BatchRequestItem.
 func TestTransit_decodeBatchRequestItems(t *testing.T) {
 	tests := []struct {
-		name            string
-		src             interface{}
-		dest            []BatchRequestItem
-		wantErrContains string
+		name              string
+		src               interface{}
+		requirePlaintext  bool
+		requireCiphertext bool
+		dest              []BatchRequestItem
+		wantErrContains   string
 	}{
 		// basic edge cases of nil values
 		{name: "nil-nil", src: nil, dest: nil},
@@ -702,13 +869,48 @@ func TestTransit_decodeBatchRequestItems(t *testing.T) {
 			src:  []interface{}{map[string]interface{}{"plaintext": "dGhlIHF1aWNrIGJyb3duIGZveA==", "nonce": "null"}},
 			dest: []BatchRequestItem{},
 		},
+		// required fields
+		{
+			name:             "required_plaintext_present",
+			src:              []interface{}{map[string]interface{}{"plaintext": ""}},
+			requirePlaintext: true,
+			dest:             []BatchRequestItem{},
+		},
+		{
+			name:             "required_plaintext_missing",
+			src:              []interface{}{map[string]interface{}{}},
+			requirePlaintext: true,
+			dest:             []BatchRequestItem{},
+			wantErrContains:  "missing plaintext",
+		},
+		{
+			name:              "required_ciphertext_present",
+			src:               []interface{}{map[string]interface{}{"ciphertext": "dGhlIHF1aWNrIGJyb3duIGZveA=="}},
+			requireCiphertext: true,
+			dest:              []BatchRequestItem{},
+		},
+		{
+			name:              "required_ciphertext_missing",
+			src:               []interface{}{map[string]interface{}{}},
+			requireCiphertext: true,
+			dest:              []BatchRequestItem{},
+			wantErrContains:   "missing ciphertext",
+		},
+		{
+			name:              "required_plaintext_and_ciphertext_missing",
+			src:               []interface{}{map[string]interface{}{}},
+			requirePlaintext:  true,
+			requireCiphertext: true,
+			dest:              []BatchRequestItem{},
+			wantErrContains:   "missing ciphertext",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			expectedDest := append(tt.dest[:0:0], tt.dest...) // copy of the dest state
 			expectedErr := mapstructure.Decode(tt.src, &expectedDest)
 
-			gotErr := decodeBatchRequestItems(tt.src, &tt.dest)
+			gotErr := decodeBatchRequestItems(tt.src, tt.requirePlaintext, tt.requireCiphertext, &tt.dest)
 			gotDest := tt.dest
 
 			if expectedErr != nil {
@@ -727,5 +929,84 @@ func TestTransit_decodeBatchRequestItems(t *testing.T) {
 				t.Errorf("decodeBatchRequestItems unexpected dest value, want: '%v', got: '%v'", expectedDest, gotDest)
 			}
 		})
+	}
+}
+
+func TestShouldWarnAboutNonceUsage(t *testing.T) {
+	tests := []struct {
+		name                 string
+		keyTypes             []KeyType
+		nonce                []byte
+		convergentEncryption bool
+		convergentVersion    int
+		expected             bool
+	}{
+		{
+			name:                 "-NoConvergent-WithNonce",
+			keyTypes:             []KeyType{KeyType_SM4_GCM96},
+			nonce:                []byte("testnonce"),
+			convergentEncryption: false,
+			convergentVersion:    -1,
+			expected:             true,
+		},
+		{
+			name:                 "-NoConvergent-NoNonce",
+			keyTypes:             []KeyType{KeyType_SM4_GCM96},
+			nonce:                []byte{},
+			convergentEncryption: false,
+			convergentVersion:    -1,
+			expected:             false,
+		},
+		{
+			name:                 "-Convergentv1-WithNonce",
+			keyTypes:             []KeyType{KeyType_SM4_GCM96},
+			nonce:                []byte("testnonce"),
+			convergentEncryption: true,
+			convergentVersion:    1,
+			expected:             true,
+		},
+		{
+			name:                 "-Convergentv2-WithNonce",
+			keyTypes:             []KeyType{KeyType_SM4_GCM96},
+			nonce:                []byte("testnonce"),
+			convergentEncryption: true,
+			convergentVersion:    2,
+			expected:             false,
+		},
+		{
+			name:                 "-Convergentv3-WithNonce",
+			keyTypes:             []KeyType{KeyType_SM4_GCM96},
+			nonce:                []byte("testnonce"),
+			convergentEncryption: true,
+			convergentVersion:    3,
+			expected:             false,
+		},
+		{
+			name:                 "-NoConvergent-WithNonce",
+			keyTypes:             []KeyType{KeyType_ECDSA_SM2},
+			nonce:                []byte("testnonce"),
+			convergentEncryption: false,
+			convergentVersion:    -1,
+			expected:             false,
+		},
+	}
+
+	for _, tt := range tests {
+		for _, keyType := range tt.keyTypes {
+			testName := keyType.String() + tt.name
+			t.Run(testName, func(t *testing.T) {
+				p := Policy{
+					ConvergentEncryption: tt.convergentEncryption,
+					ConvergentVersion:    tt.convergentVersion,
+					Type:                 keyType,
+				}
+
+				actual := shouldWarnAboutNonceUsage(&p, tt.nonce)
+
+				if actual != tt.expected {
+					t.Errorf("Expected actual '%v' but got '%v'", tt.expected, actual)
+				}
+			})
+		}
 	}
 }

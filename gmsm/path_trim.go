@@ -10,6 +10,11 @@ import (
 func (b *backend) pathTrim() *framework.Path {
 	return &framework.Path{
 		Pattern: "keys/" + framework.GenericNameRegex("name") + "/trim",
+		DisplayAttrs: &framework.DisplayAttributes{
+			OperationPrefix: operationPrefix,
+			OperationVerb:   "trim",
+			OperationSuffix: "key",
+		},		
 		Fields: map[string]*framework.FieldSchema{
 			"name": {
 				Type:        framework.TypeString,

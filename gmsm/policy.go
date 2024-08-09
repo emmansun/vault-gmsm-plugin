@@ -1,13 +1,15 @@
+// Reference: https://github.com/hashicorp/vault/blob/main/sdk/helper/keysutil/policy.go
 package gmsm
 
 import (
 	"bytes"
 	"context"
+	"crypto"
 	"crypto/cipher"
 	"crypto/ecdsa"
 	"crypto/hmac"
 	"crypto/rand"
-	"crypto/sha256"
+	"crypto/x509"
 	"encoding/asn1"
 	"encoding/base64"
 	"encoding/json"
@@ -24,9 +26,9 @@ import (
 	"time"
 
 	"github.com/emmansun/gmsm/sm2"
+	"github.com/emmansun/gmsm/sm3"
 	"github.com/emmansun/gmsm/sm4"
 	"github.com/emmansun/gmsm/smx509"
-	"github.com/hashicorp/errwrap"
 	uuid "github.com/hashicorp/go-uuid"
 	"github.com/hashicorp/vault/sdk/helper/errutil"
 	"github.com/hashicorp/vault/sdk/helper/jsonutil"
@@ -39,19 +41,24 @@ import (
 // Careful with iota; don't put anything before it in this const block because
 // we need the default of zero to be the old-style KDF
 const (
-	Kdf_hmac_sha256_counter = iota // built-in helper
-	Kdf_hkdf_sha256                // golang.org/x/crypto/hkdf
+	Kdf_hmac_sm3_counter = iota // built-in helper
+	Kdf_hkdf_sm3                // golang.org/x/crypto/hkdf
+
+	HmacMinKeySize = 256 / 8
+	HmacMaxKeySize = 4096 / 8
 )
 
 // Or this one...we need the default of zero to be the original SM4-GCM96
 const (
 	KeyType_SM4_GCM96 = iota
 	KeyType_ECDSA_SM2
+	KeyType_MANAGED_KEY
+	KeyType_HMAC
+	KeyType_SM4_CMAC
 )
 
-type KeyData struct {
-	Policy       *Policy       `json:"policy"`
-	ArchivedKeys *archivedKeys `json:"archived_keys"`
+type ecdsaSignature struct {
+	R, S *big.Int
 }
 
 type KeyType int
@@ -81,10 +88,6 @@ func (kt KeyType) SigningSupported() bool {
 }
 
 func (kt KeyType) HashSignatureInput() bool {
-	switch kt {
-	case KeyType_ECDSA_SM2:
-		return true
-	}
 	return false
 }
 
@@ -96,15 +99,65 @@ func (kt KeyType) DerivationSupported() bool {
 	return false
 }
 
+func (kt KeyType) AssociatedDataSupported() bool {
+	switch kt {
+	case KeyType_SM4_GCM96, KeyType_MANAGED_KEY:
+		return true
+	}
+	return false
+}
+
+func (kt KeyType) CMACSupported() bool {
+	switch kt {
+	case KeyType_SM4_CMAC:
+		return true
+	default:
+		return false
+	}
+}
+
+func (kt KeyType) HMACSupported() bool {
+	switch {
+	case kt.CMACSupported():
+		return false
+	case kt == KeyType_MANAGED_KEY:
+		return false
+	default:
+		return true
+	}
+}
+
+func (kt KeyType) ImportPublicKeySupported() bool {
+	switch kt {
+	case KeyType_ECDSA_SM2:
+		return true
+	}
+	return false
+}
+
 func (kt KeyType) String() string {
 	switch kt {
 	case KeyType_SM4_GCM96:
 		return "sm4-gcm96"
 	case KeyType_ECDSA_SM2:
 		return "ecdsa-sm2"
+	case KeyType_HMAC:
+		return "hmac"
+	case KeyType_MANAGED_KEY:
+		return "managed_key"
+	case KeyType_SM4_CMAC:
+		return "sm4-cmac"
 	}
 	return "[unknown]"
 }
+
+type KeyData struct {
+	Policy       *Policy       `json:"policy"`
+	ArchivedKeys *archivedKeys `json:"archived_keys"`
+}
+
+// keyEntryMap is used to allow JSON marshal/unmarshal
+type keyEntryMap map[string]keysutil.KeyEntry
 
 // PolicyConfig is used to create a new policy
 type PolicyConfig struct {
@@ -139,8 +192,46 @@ type PolicyConfig struct {
 	StoragePrefix string
 }
 
-// keyEntryMap is used to allow JSON marshal/unmarshal
-type keyEntryMap map[string]keysutil.KeyEntry
+// NewPolicy takes a policy config and returns a Policy with those settings.
+func NewPolicy(config PolicyConfig) *Policy {
+	return &Policy{
+		l:                    new(sync.RWMutex),
+		Name:                 config.Name,
+		Type:                 config.Type,
+		Derived:              config.Derived,
+		KDF:                  config.KDF,
+		ConvergentEncryption: config.ConvergentEncryption,
+		ConvergentVersion:    -1,
+		Exportable:           config.Exportable,
+		DeletionAllowed:      config.DeletionAllowed,
+		AllowPlaintextBackup: config.AllowPlaintextBackup,
+		VersionTemplate:      config.VersionTemplate,
+		StoragePrefix:        config.StoragePrefix,
+	}
+}
+
+// LoadPolicy will load a policy from the provided storage path and set the
+// necessary un-exported variables. It is particularly useful when accessing a
+// policy without the lock manager.
+func LoadPolicy(ctx context.Context, s logical.Storage, path string) (*Policy, error) {
+	raw, err := s.Get(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	if raw == nil {
+		return nil, nil
+	}
+
+	var policy Policy
+	err = jsonutil.DecodeJSON(raw.Value, &policy)
+	if err != nil {
+		return nil, err
+	}
+
+	policy.l = new(sync.RWMutex)
+
+	return &policy, nil
+}
 
 // Policy is the struct used to store metadata
 type Policy struct {
@@ -155,9 +246,10 @@ type Policy struct {
 	// served after a delete.
 	deleted uint32
 
-	Name string      `json:"name"`
-	Key  []byte      `json:"key,omitempty"` //DEPRECATED
-	Keys keyEntryMap `json:"keys"`
+	Name    string      `json:"name"`
+	Key     []byte      `json:"key,omitempty"`      //DEPRECATED
+	KeySize int         `json:"key_size,omitempty"` // For algorithms with variable key sizes
+	Keys    keyEntryMap `json:"keys"`
 
 	// Derived keys MUST provide a context and the master underlying key is
 	// never used. If convergent encryption is true, the context will be used
@@ -218,50 +310,20 @@ type Policy struct {
 	// policy object.
 	StoragePrefix string `json:"storage_prefix"`
 
+	// AutoRotatePeriod defines how frequently the key should automatically
+	// rotate. Setting this to zero disables automatic rotation for the key.
+	AutoRotatePeriod time.Duration `json:"auto_rotate_period"`
+
 	// versionPrefixCache stores caches of version prefix strings and the split
 	// version template.
 	versionPrefixCache sync.Map
-}
 
-// NewPolicy takes a policy config and returns a Policy with those settings.
-func NewPolicy(config PolicyConfig) *Policy {
-	return &Policy{
-		l:                    new(sync.RWMutex),
-		Name:                 config.Name,
-		Type:                 config.Type,
-		Derived:              config.Derived,
-		KDF:                  config.KDF,
-		ConvergentEncryption: config.ConvergentEncryption,
-		ConvergentVersion:    -1,
-		Exportable:           config.Exportable,
-		DeletionAllowed:      config.DeletionAllowed,
-		AllowPlaintextBackup: config.AllowPlaintextBackup,
-		VersionTemplate:      config.VersionTemplate,
-		StoragePrefix:        config.StoragePrefix,
-	}
-}
+	// Imported indicates whether the key was generated by Vault or imported
+	// from an external source
+	Imported bool
 
-// LoadPolicy will load a policy from the provided storage path and set the
-// necessary un-exported variables. It is particularly useful when accessing a
-// policy without the lock manager.
-func LoadPolicy(ctx context.Context, s logical.Storage, path string) (*Policy, error) {
-	raw, err := s.Get(ctx, path)
-	if err != nil {
-		return nil, err
-	}
-	if raw == nil {
-		return nil, nil
-	}
-
-	var policy Policy
-	err = jsonutil.DecodeJSON(raw.Value, &policy)
-	if err != nil {
-		return nil, err
-	}
-
-	policy.l = new(sync.RWMutex)
-
-	return &policy, nil
+	// AllowImportedKeyRotation indicates whether an imported key may be rotated by Vault
+	AllowImportedKeyRotation bool
 }
 
 func (p *Policy) Lock(exclusive bool) {
@@ -494,8 +556,10 @@ func (p *Policy) NeedsUpgrade() bool {
 		return true
 	}
 
-	if p.Keys[strconv.Itoa(p.LatestVersion)].HMACKey == nil || len(p.Keys[strconv.Itoa(p.LatestVersion)].HMACKey) == 0 {
-		return true
+	if p.Type.HMACSupported() {
+		if p.Keys[strconv.Itoa(p.LatestVersion)].HMACKey == nil || len(p.Keys[strconv.Itoa(p.LatestVersion)].HMACKey) == 0 {
+			return true
+		}
 	}
 
 	return false
@@ -556,15 +620,21 @@ func (p *Policy) Upgrade(ctx context.Context, storage logical.Storage, randReade
 		persistNeeded = true
 	}
 
-	if p.Keys[strconv.Itoa(p.LatestVersion)].HMACKey == nil || len(p.Keys[strconv.Itoa(p.LatestVersion)].HMACKey) == 0 {
-		entry := p.Keys[strconv.Itoa(p.LatestVersion)]
-		hmacKey, err := uuid.GenerateRandomBytesWithReader(32, randReader)
-		if err != nil {
-			return err
+	if p.Type.HMACSupported() {
+		if p.Keys[strconv.Itoa(p.LatestVersion)].HMACKey == nil || len(p.Keys[strconv.Itoa(p.LatestVersion)].HMACKey) == 0 {
+			entry := p.Keys[strconv.Itoa(p.LatestVersion)]
+			hmacKey, err := uuid.GenerateRandomBytesWithReader(32, randReader)
+			if err != nil {
+				return err
+			}
+			entry.HMACKey = hmacKey
+			p.Keys[strconv.Itoa(p.LatestVersion)] = entry
+			persistNeeded = true
+
+			if p.Type == KeyType_HMAC {
+				entry.HMACKey = entry.Key
+			}
 		}
-		entry.HMACKey = hmacKey
-		p.Keys[strconv.Itoa(p.LatestVersion)] = entry
-		persistNeeded = true
 	}
 
 	if persistNeeded {
@@ -595,6 +665,18 @@ func (p *Policy) GetKey(context []byte, ver, numBytes int) ([]byte, error) {
 	return p.DeriveKey(context, nil, ver, numBytes)
 }
 
+const (
+	// hmacSM3PRFLen is the length of output from hmacSM3256PRF
+	hmacSM3PRFLen uint32 = 256
+)
+
+// hmacSM3256PRF is a pseudo-random-function (PRF) that uses an HMAC-SM3
+func hmacSM3256PRF(key []byte, data []byte) ([]byte, error) {
+	hash := hmac.New(sm3.New, key)
+	hash.Write(data)
+	return hash.Sum(nil), nil
+}
+
 // DeriveKey is used to derive a symmetric key given a context and salt.  This does not
 // check the policies Derived flag, but just implements the derivation logic.  GetKey
 // is responsible for switching on the policy config.
@@ -622,13 +704,13 @@ func (p *Policy) DeriveKey(context, salt []byte, ver int, numBytes int) ([]byte,
 	}
 
 	switch p.KDF {
-	case Kdf_hmac_sha256_counter:
-		prf := kdf.HMACSHA256PRF
-		prfLen := kdf.HMACSHA256PRFLen
+	case Kdf_hmac_sm3_counter:
+		prf := hmacSM3256PRF
+		prfLen := hmacSM3PRFLen
 		return kdf.CounterMode(prf, prfLen, keyEntry.Key, append(context, salt...), 256)
 
-	case Kdf_hkdf_sha256:
-		reader := hkdf.New(sha256.New, keyEntry.Key, salt, context)
+	case Kdf_hkdf_sm3:
+		reader := hkdf.New(sm3.New, keyEntry.Key, salt, context)
 		derBytes := bytes.NewBuffer(nil)
 		derBytes.Grow(numBytes)
 		limReader := &io.LimitedReader{
@@ -683,86 +765,102 @@ func (p *Policy) convergentVersion(ver int) int {
 	return convergentVersion
 }
 
-// SymmetricOpts are the arguments to symmetric operations that are "optional", e.g.
-// not always used.  This improves the aesthetics of calls to those functions.
-type SymmetricOpts struct {
-	// Whether to use convergent encryption
-	Convergent bool
-	// The version of the convergent encryption scheme
-	ConvergentVersion int
-	// The nonce, if not randomly generated
-	Nonce []byte
-	// Additional data to include in AEAD authentication
-	AdditionalData []byte
-	// The HMAC key, for generating IVs in convergent encryption
-	HMACKey []byte
+func (p *Policy) Encrypt(ver int, context, nonce []byte, value string) (string, error) {
+	return p.EncryptWithFactory(ver, context, nonce, value, nil)
 }
 
-func (p *Policy) Encrypt(ver int, context, nonce []byte, value string) (string, error) {
-	if !p.Type.EncryptionSupported() {
-		return "", errutil.UserError{Err: fmt.Sprintf("message encryption not supported for key type %v", p.Type)}
+func (p *Policy) Decrypt(context, nonce []byte, value string) (string, error) {
+	return p.DecryptWithFactory(context, nonce, value, nil)
+}
+
+func (p *Policy) DecryptWithFactory(context, nonce []byte, value string, factories ...interface{}) (string, error) {
+	if !p.Type.DecryptionSupported() {
+		return "", errutil.UserError{Err: fmt.Sprintf("message decryption not supported for key type %v", p.Type)}
 	}
 
-	// Decode the plaintext value
-	plaintext, err := base64.StdEncoding.DecodeString(value)
+	tplParts, err := p.getTemplateParts()
 	if err != nil {
-		return "", errutil.UserError{Err: err.Error()}
+		return "", err
 	}
 
-	switch {
-	case ver == 0:
-		ver = p.LatestVersion
-	case ver < 0:
-		return "", errutil.UserError{Err: "requested version for encryption is negative"}
-	case ver > p.LatestVersion:
-		return "", errutil.UserError{Err: "requested version for encryption is higher than the latest key version"}
-	case ver < p.MinEncryptionVersion:
-		return "", errutil.UserError{Err: "requested version for encryption is less than the minimum encryption key version"}
+	// Verify the prefix
+	if !strings.HasPrefix(value, tplParts[0]) {
+		return "", errutil.UserError{Err: "invalid ciphertext: no prefix"}
 	}
 
-	var ciphertext []byte
+	splitVerCiphertext := strings.SplitN(strings.TrimPrefix(value, tplParts[0]), tplParts[1], 2)
+	if len(splitVerCiphertext) != 2 {
+		return "", errutil.UserError{Err: "invalid ciphertext: wrong number of fields"}
+	}
+
+	ver, err := strconv.Atoi(splitVerCiphertext[0])
+	if err != nil {
+		return "", errutil.UserError{Err: "invalid ciphertext: version number could not be decoded"}
+	}
+
+	if ver == 0 {
+		// Compatibility mode with initial implementation, where keys start at
+		// zero
+		ver = 1
+	}
+
+	if ver > p.LatestVersion {
+		return "", errutil.UserError{Err: "invalid ciphertext: version is too new"}
+	}
+
+	if p.MinDecryptionVersion > 0 && ver < p.MinDecryptionVersion {
+		return "", errutil.UserError{Err: keysutil.ErrTooOld}
+	}
+
+	convergentVersion := p.convergentVersion(ver)
+	if convergentVersion == 1 && (nonce == nil || len(nonce) == 0) {
+		return "", errutil.UserError{Err: "invalid convergent nonce supplied"}
+	}
+
+	// Decode the base64
+	decoded, err := base64.StdEncoding.DecodeString(splitVerCiphertext[1])
+	if err != nil {
+		return "", errutil.UserError{Err: "invalid ciphertext: could not decode base64"}
+	}
+
+	var plain []byte
 
 	switch p.Type {
 	case KeyType_SM4_GCM96:
-		hmacKey := context
+		numBytes := 16
 
-		var encKey []byte
-		var deriveHMAC bool
-
-		encBytes := 16
-		hmacBytes := 0
-		if p.convergentVersion(ver) > 2 {
-			deriveHMAC = true
-			hmacBytes = 32
-		}
-
-		key, err := p.GetKey(context, ver, encBytes+hmacBytes)
+		encKey, err := p.GetKey(context, ver, numBytes)
 		if err != nil {
 			return "", err
 		}
 
-		if len(key) < encBytes+hmacBytes {
-			return "", errutil.InternalError{Err: "could not derive key, length too small"}
-		}
-
-		encKey = key[:encBytes]
-		if len(encKey) != encBytes {
+		if len(encKey) != numBytes {
 			return "", errutil.InternalError{Err: "could not derive enc key, length not correct"}
 		}
-		if deriveHMAC {
-			hmacKey = key[encBytes:]
-			if len(hmacKey) != hmacBytes {
-				return "", errutil.InternalError{Err: "could not derive hmac key, length not correct"}
+
+		symopts := keysutil.SymmetricOpts{
+			Convergent:        p.ConvergentEncryption,
+			ConvergentVersion: p.ConvergentVersion,
+		}
+		for index, rawFactory := range factories {
+			if rawFactory == nil {
+				continue
+			}
+			switch factory := rawFactory.(type) {
+			case keysutil.AEADFactory:
+				symopts.AEADFactory = factory
+			case keysutil.AssociatedDataFactory:
+				symopts.AdditionalData, err = factory.GetAssociatedData()
+				if err != nil {
+					return "", errutil.InternalError{Err: fmt.Sprintf("unable to get associated_data/additional_data from factory[%d]: %v", index, err)}
+				}
+			case keysutil.ManagedKeyFactory:
+			default:
+				return "", errutil.InternalError{Err: fmt.Sprintf("unknown type of factory[%d]: %T", index, rawFactory)}
 			}
 		}
 
-		ciphertext, err = p.SymmetricEncryptRaw(ver, encKey, plaintext,
-			SymmetricOpts{
-				Convergent: p.ConvergentEncryption,
-				HMACKey:    hmacKey,
-				Nonce:      nonce,
-			})
-
+		plain, err = p.SymmetricDecryptRaw(encKey, decoded, symopts)
 		if err != nil {
 			return "", err
 		}
@@ -771,83 +869,47 @@ func (p *Policy) Encrypt(ver int, context, nonce []byte, value string) (string, 
 		if err != nil {
 			return "", err
 		}
-		key := &ecdsa.PublicKey{
-			Curve: sm2.P256(),
-			X:     keyEntry.EC_X,
-			Y:     keyEntry.EC_Y,
+		key, err := sm2.NewPrivateKeyFromInt(keyEntry.EC_D)
+		if err != nil {
+			return "", err
 		}
-		ciphertext, err = sm2.Encrypt(rand.Reader, key, plaintext, nil)
+		plain, err = sm2.Decrypt(key, decoded)
+		if err != nil {
+			return "", err
+		}
+	case KeyType_MANAGED_KEY:
+		keyEntry, err := p.safeGetKeyEntry(ver)
+		if err != nil {
+			return "", err
+		}
+		var aad []byte
+		var managedKeyFactory keysutil.ManagedKeyFactory
+		for _, f := range factories {
+			switch factory := f.(type) {
+			case keysutil.AssociatedDataFactory:
+				aad, err = factory.GetAssociatedData()
+				if err != nil {
+					return "", err
+				}
+			case keysutil.ManagedKeyFactory:
+				managedKeyFactory = factory
+			}
+		}
+
+		if managedKeyFactory == nil {
+			return "", errors.New("key type is managed_key, but managed key parameters were not provided")
+		}
+
+		plain, err = p.decryptWithManagedKey(managedKeyFactory.GetManagedKeyParameters(), keyEntry, decoded, nonce, aad)
+		if err != nil {
+			return "", err
+		}
+
 	default:
 		return "", errutil.InternalError{Err: fmt.Sprintf("unsupported key type %v", p.Type)}
 	}
 
-	// Convert to base64
-	encoded := base64.StdEncoding.EncodeToString(ciphertext)
-
-	// Prepend some information
-	encoded = p.getVersionPrefix(ver) + encoded
-
-	return encoded, nil
-}
-
-// Symmetrically encrypt a plaintext given the convergence configuration and appropriate keys
-func (p *Policy) SymmetricEncryptRaw(ver int, encKey, plaintext []byte, opts SymmetricOpts) ([]byte, error) {
-	var aead cipher.AEAD
-	var err error
-	nonce := opts.Nonce
-
-	switch p.Type {
-	case KeyType_SM4_GCM96:
-		// Setup the cipher
-		sm4Cipher, err := sm4.NewCipher(encKey)
-		if err != nil {
-			return nil, errutil.InternalError{Err: err.Error()}
-		}
-
-		// Setup the GCM AEAD
-		gcm, err := cipher.NewGCM(sm4Cipher)
-		if err != nil {
-			return nil, errutil.InternalError{Err: err.Error()}
-		}
-
-		aead = gcm
-
-	}
-
-	if opts.Convergent {
-		convergentVersion := p.convergentVersion(ver)
-		switch convergentVersion {
-		case 1:
-			if len(opts.Nonce) != aead.NonceSize() {
-				return nil, errutil.UserError{Err: fmt.Sprintf("base64-decoded nonce must be %d bytes long when using convergent encryption with this key", aead.NonceSize())}
-			}
-		case 2, 3:
-			if len(opts.HMACKey) == 0 {
-				return nil, errutil.InternalError{Err: fmt.Sprintf("invalid hmac key length of zero")}
-			}
-			nonceHmac := hmac.New(sha256.New, opts.HMACKey)
-			nonceHmac.Write(plaintext)
-			nonceSum := nonceHmac.Sum(nil)
-			nonce = nonceSum[:aead.NonceSize()]
-		default:
-			return nil, errutil.InternalError{Err: fmt.Sprintf("unhandled convergent version %d", convergentVersion)}
-		}
-	} else if len(nonce) == 0 {
-		// Compute random nonce
-		nonce, err = uuid.GenerateRandomBytes(aead.NonceSize())
-		if err != nil {
-			return nil, errutil.InternalError{Err: err.Error()}
-		}
-	}
-
-	// Encrypt and tag with AEAD
-	ciphertext := aead.Seal(nil, nonce, plaintext, opts.AdditionalData)
-
-	// Place the encrypted data after the nonce
-	if !opts.Convergent || p.convergentVersion(ver) > 1 {
-		ciphertext = append(nonce, ciphertext...)
-	}
-	return ciphertext, nil
+	return base64.StdEncoding.EncodeToString(plain), nil
 }
 
 func (p *Policy) HMACKey(version int) ([]byte, error) {
@@ -861,11 +923,327 @@ func (p *Policy) HMACKey(version int) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	if p.Type == KeyType_HMAC {
+		return keyEntry.Key, nil
+	}
 	if keyEntry.HMACKey == nil {
 		return nil, fmt.Errorf("no HMAC key exists for that key version")
 	}
 
 	return keyEntry.HMACKey, nil
+}
+
+func (p *Policy) CMACKey(version int) ([]byte, error) {
+	switch {
+	case version < 0:
+		return nil, fmt.Errorf("key version does not exist (cannot be negative)")
+	case version > p.LatestVersion:
+		return nil, fmt.Errorf("key version does not exist; latest key version is %d", p.LatestVersion)
+	}
+	keyEntry, err := p.safeGetKeyEntry(version)
+	if err != nil {
+		return nil, err
+	}
+
+	if p.Type.CMACSupported() {
+		return keyEntry.Key, nil
+	}
+
+	return nil, fmt.Errorf("key type %s does not support CMAC operations", p.Type)
+}
+
+type SigningOptions struct {
+	Marshaling       keysutil.MarshalingType
+	UID              []byte
+	Prehashed        bool
+	ManagedKeyParams keysutil.ManagedKeyParameters
+}
+
+func (p *Policy) SignWithOptions(ver int, context, input []byte, options *SigningOptions) (*keysutil.SigningResult, error) {
+	if !p.Type.SigningSupported() {
+		return nil, fmt.Errorf("message signing not supported for key type %v", p.Type)
+	}
+
+	switch {
+	case ver == 0:
+		ver = p.LatestVersion
+	case ver < 0:
+		return nil, errutil.UserError{Err: "requested version for signing is negative"}
+	case ver > p.LatestVersion:
+		return nil, errutil.UserError{Err: "requested version for signing is higher than the latest key version"}
+	case p.MinEncryptionVersion > 0 && ver < p.MinEncryptionVersion:
+		return nil, errutil.UserError{Err: "requested version for signing is less than the minimum encryption key version"}
+	}
+
+	var sig []byte
+	var pubKey []byte
+	var err error
+	var r, s *big.Int
+	keyParams, err := p.safeGetKeyEntry(ver)
+	if err != nil {
+		return nil, err
+	}
+
+	// Before signing, check if key has its private part, if not return error
+	if keyParams.IsPrivateKeyMissing() {
+		return nil, errutil.UserError{Err: "requested version for signing does not contain a private part"}
+	}
+
+	marshaling := options.Marshaling
+
+	switch p.Type {
+	case KeyType_ECDSA_SM2:
+		var curveBits int = 256
+		key := new(sm2.PrivateKey)
+		key.PublicKey = ecdsa.PublicKey{
+			Curve: sm2.P256(),
+			X:     keyParams.EC_X,
+			Y:     keyParams.EC_Y,
+		}
+		key.D = keyParams.EC_D
+
+		if options.Prehashed {
+			r, s, err = sm2.Sign(rand.Reader, &key.PrivateKey, input)
+		} else {
+			r, s, err = sm2.SignWithSM2(rand.Reader, &key.PrivateKey, options.UID, input)
+		}
+		if err != nil {
+			return nil, err
+		}
+
+		switch marshaling {
+		case keysutil.MarshalingTypeASN1:
+			// This is used by openssl and X.509
+			sig, err = asn1.Marshal(ecdsaSignature{
+				R: r,
+				S: s,
+			})
+			if err != nil {
+				return nil, err
+			}
+
+		case keysutil.MarshalingTypeJWS:
+			// This is used by JWS
+
+			// First we have to get the length of the curve in bytes. Although
+			// we only support 256 now, we'll do this in an agnostic way so we
+			// can reuse this marshaling if we support e.g. 521. Getting the
+			// number of bytes without rounding up would be 65.125 so we need
+			// to add one in that case.
+			keyLen := curveBits / 8
+			if curveBits%8 > 0 {
+				keyLen++
+			}
+
+			// Now create the output array
+			sig = make([]byte, keyLen*2)
+			rb := r.Bytes()
+			sb := s.Bytes()
+			copy(sig[keyLen-len(rb):], rb)
+			copy(sig[2*keyLen-len(sb):], sb)
+
+		default:
+			return nil, errutil.UserError{Err: "requested marshaling type is invalid"}
+		}
+
+	default:
+		return nil, fmt.Errorf("unsupported key type %v", p.Type)
+	}
+
+	// Convert to base64
+	var encoded string
+	switch marshaling {
+	case keysutil.MarshalingTypeASN1:
+		encoded = base64.StdEncoding.EncodeToString(sig)
+	case keysutil.MarshalingTypeJWS:
+		encoded = base64.RawURLEncoding.EncodeToString(sig)
+	}
+	res := &keysutil.SigningResult{
+		Signature: p.getVersionPrefix(ver) + encoded,
+		PublicKey: pubKey,
+	}
+
+	return res, nil
+}
+
+func (p *Policy) VerifySignatureWithOptions(context, input []byte, sig string, options *SigningOptions) (bool, error) {
+	if !p.Type.SigningSupported() {
+		return false, errutil.UserError{Err: fmt.Sprintf("message verification not supported for key type %v", p.Type)}
+	}
+
+	tplParts, err := p.getTemplateParts()
+	if err != nil {
+		return false, err
+	}
+
+	// Verify the prefix
+	if !strings.HasPrefix(sig, tplParts[0]) {
+		return false, errutil.UserError{Err: "invalid signature: no prefix"}
+	}
+
+	splitVerSig := strings.SplitN(strings.TrimPrefix(sig, tplParts[0]), tplParts[1], 2)
+	if len(splitVerSig) != 2 {
+		return false, errutil.UserError{Err: "invalid signature: wrong number of fields"}
+	}
+
+	ver, err := strconv.Atoi(splitVerSig[0])
+	if err != nil {
+		return false, errutil.UserError{Err: "invalid signature: version number could not be decoded"}
+	}
+
+	if ver > p.LatestVersion {
+		return false, errutil.UserError{Err: "invalid signature: version is too new"}
+	}
+
+	if p.MinDecryptionVersion > 0 && ver < p.MinDecryptionVersion {
+		return false, errutil.UserError{Err: keysutil.ErrTooOld}
+	}
+
+	marshaling := options.Marshaling
+
+	var sigBytes []byte
+	switch marshaling {
+	case keysutil.MarshalingTypeASN1:
+		sigBytes, err = base64.StdEncoding.DecodeString(splitVerSig[1])
+	case keysutil.MarshalingTypeJWS:
+		sigBytes, err = base64.RawURLEncoding.DecodeString(splitVerSig[1])
+	default:
+		return false, errutil.UserError{Err: "requested marshaling type is invalid"}
+	}
+	if err != nil {
+		return false, errutil.UserError{Err: "invalid base64 signature value"}
+	}
+
+	switch p.Type {
+	case KeyType_ECDSA_SM2:
+		var ecdsaSig ecdsaSignature
+
+		switch marshaling {
+		case keysutil.MarshalingTypeASN1:
+			rest, err := asn1.Unmarshal(sigBytes, &ecdsaSig)
+			if err != nil {
+				return false, errutil.UserError{Err: "supplied signature is invalid"}
+			}
+			if len(rest) != 0 {
+				return false, errutil.UserError{Err: "supplied signature contains extra data"}
+			}
+
+		case keysutil.MarshalingTypeJWS:
+			paramLen := len(sigBytes) / 2
+			rb := sigBytes[:paramLen]
+			sb := sigBytes[paramLen:]
+			ecdsaSig.R = new(big.Int)
+			ecdsaSig.R.SetBytes(rb)
+			ecdsaSig.S = new(big.Int)
+			ecdsaSig.S.SetBytes(sb)
+		}
+
+		keyParams, err := p.safeGetKeyEntry(ver)
+		if err != nil {
+			return false, err
+		}
+		key := &ecdsa.PublicKey{
+			Curve: sm2.P256(),
+			X:     keyParams.EC_X,
+			Y:     keyParams.EC_Y,
+		}
+
+		if options.Prehashed {
+			return sm2.Verify(key, input, ecdsaSig.R, ecdsaSig.S), nil
+		}
+		return sm2.VerifyWithSM2(key, options.UID, input, ecdsaSig.R, ecdsaSig.S), nil
+
+	default:
+		return false, errutil.InternalError{Err: fmt.Sprintf("unsupported key type %v", p.Type)}
+	}
+}
+
+func (p *Policy) Import(ctx context.Context, storage logical.Storage, key []byte, randReader io.Reader) error {
+	return p.ImportPublicOrPrivate(ctx, storage, key, true, randReader)
+}
+
+func (p *Policy) ImportPublicOrPrivate(ctx context.Context, storage logical.Storage, key []byte, isPrivateKey bool, randReader io.Reader) error {
+	now := time.Now()
+	entry := keysutil.KeyEntry{
+		CreationTime:           now,
+		DeprecatedCreationTime: now.Unix(),
+	}
+
+	// Before we insert this entry, check if the latest version is incomplete
+	// and this entry matches the current version; if so, return without
+	// updating to the next version.
+	if p.LatestVersion > 0 {
+		latestKey := p.Keys[strconv.Itoa(p.LatestVersion)]
+		if latestKey.IsPrivateKeyMissing() && isPrivateKey {
+			if err := p.ImportPrivateKeyForVersion(ctx, storage, p.LatestVersion, key); err == nil {
+				return nil
+			}
+		}
+	}
+
+	if p.Type != KeyType_HMAC {
+		hmacKey, err := uuid.GenerateRandomBytesWithReader(32, randReader)
+		if err != nil {
+			return err
+		}
+		entry.HMACKey = hmacKey
+	}
+
+	if ((p.Type == KeyType_SM4_GCM96 || p.Type == KeyType_SM4_CMAC) && len(key) != 16) ||
+		(p.Type == KeyType_HMAC && (len(key) < HmacMinKeySize || len(key) > HmacMaxKeySize)) {
+		return fmt.Errorf("invalid key size %d bytes for key type %s", len(key), p.Type)
+	}
+
+	if p.Type == KeyType_SM4_GCM96 || p.Type == KeyType_HMAC || p.Type == KeyType_SM4_CMAC {
+		entry.Key = key
+		if p.Type == KeyType_HMAC {
+			p.KeySize = len(key)
+			entry.HMACKey = key
+		}
+	} else {
+		var parsedKey any
+		var err error
+		if isPrivateKey {
+			parsedKey, err = smx509.ParsePKCS8PrivateKey(key)
+			if err != nil {
+				return fmt.Errorf("error parsing asymmetric key: %s", err)
+			}
+		} else {
+			pemBlock, _ := pem.Decode(key)
+			if pemBlock == nil {
+				return fmt.Errorf("error parsing public key: not in PEM format")
+			}
+
+			parsedKey, err = smx509.ParsePKIXPublicKey(pemBlock.Bytes)
+			if err != nil {
+				return fmt.Errorf("error parsing public key: %w", err)
+			}
+		}
+
+		err = parseFromKey(&entry, p.Type, parsedKey)
+		if err != nil {
+			return err
+		}
+	}
+
+	p.LatestVersion += 1
+
+	if p.Keys == nil {
+		// This is an initial key rotation when generating a new policy. We
+		// don't need to call migrate here because if we've called getPolicy to
+		// get the policy in the first place it will have been run.
+		p.Keys = keyEntryMap{}
+	}
+	p.Keys[strconv.Itoa(p.LatestVersion)] = entry
+
+	// This ensures that with new key creations min decryption version is set
+	// to 1 rather than the int default of 0, since keys start at 1 (either
+	// fresh or after migration to the key map)
+	if p.MinDecryptionVersion == 0 {
+		p.MinDecryptionVersion = 1
+	}
+
+	return p.Persist(ctx, storage)
 }
 
 // Rotate rotates the policy and persists it to storage.
@@ -905,11 +1283,13 @@ func (p *Policy) RotateInMemory(randReader io.Reader) (retErr error) {
 		DeprecatedCreationTime: now.Unix(),
 	}
 
-	hmacKey, err := uuid.GenerateRandomBytesWithReader(32, randReader)
-	if err != nil {
-		return err
+	if p.Type != KeyType_SM4_CMAC && p.Type != KeyType_HMAC {
+		hmacKey, err := uuid.GenerateRandomBytesWithReader(32, randReader)
+		if err != nil {
+			return err
+		}
+		entry.HMACKey = hmacKey
 	}
-	entry.HMACKey = hmacKey
 
 	switch p.Type {
 	case KeyType_SM4_GCM96:
@@ -931,7 +1311,7 @@ func (p *Policy) RotateInMemory(randReader io.Reader) (retErr error) {
 		entry.EC_Y = privKey.Y
 		derBytes, err := smx509.MarshalPKIXPublicKey(privKey.Public())
 		if err != nil {
-			return errwrap.Wrapf("error marshaling public key: {{err}}", err)
+			return fmt.Errorf("error marshaling public key: %w", err)
 		}
 		pemBlock := &pem.Block{
 			Type:  "PUBLIC KEY",
@@ -1007,7 +1387,7 @@ func (p *Policy) Backup(ctx context.Context, storage logical.Storage) (out strin
 	}
 	err := p.Persist(ctx, storage)
 	if err != nil {
-		return "", errwrap.Wrapf("failed to persist policy with backup info: {{err}}", err)
+		return "", fmt.Errorf("failed to persist policy with backup info: %w", err)
 	}
 
 	// Load the archive only after persisting the policy as the archive can get
@@ -1067,102 +1447,81 @@ func (p *Policy) getVersionPrefix(ver int) string {
 	return prefix
 }
 
-func (p *Policy) Decrypt(context, nonce []byte, value string) (string, error) {
-	if !p.Type.DecryptionSupported() {
-		return "", errutil.UserError{Err: fmt.Sprintf("message decryption not supported for key type %v", p.Type)}
-	}
-
-	tplParts, err := p.getTemplateParts()
-	if err != nil {
-		return "", err
-	}
-
-	// Verify the prefix
-	if !strings.HasPrefix(value, tplParts[0]) {
-		return "", errutil.UserError{Err: "invalid ciphertext: no prefix"}
-	}
-
-	splitVerCiphertext := strings.SplitN(strings.TrimPrefix(value, tplParts[0]), tplParts[1], 2)
-	if len(splitVerCiphertext) != 2 {
-		return "", errutil.UserError{Err: "invalid ciphertext: wrong number of fields"}
-	}
-
-	ver, err := strconv.Atoi(splitVerCiphertext[0])
-	if err != nil {
-		return "", errutil.UserError{Err: "invalid ciphertext: version number could not be decoded"}
-	}
-
-	if ver == 0 {
-		// Compatibility mode with initial implementation, where keys start at
-		// zero
-		ver = 1
-	}
-
-	if ver > p.LatestVersion {
-		return "", errutil.UserError{Err: "invalid ciphertext: version is too new"}
-	}
-
-	if p.MinDecryptionVersion > 0 && ver < p.MinDecryptionVersion {
-		return "", errutil.UserError{Err: keysutil.ErrTooOld}
-	}
-
-	convergentVersion := p.convergentVersion(ver)
-	if convergentVersion == 1 && (nonce == nil || len(nonce) == 0) {
-		return "", errutil.UserError{Err: "invalid convergent nonce supplied"}
-	}
-
-	// Decode the base64
-	decoded, err := base64.StdEncoding.DecodeString(splitVerCiphertext[1])
-	if err != nil {
-		return "", errutil.UserError{Err: "invalid ciphertext: could not decode base64"}
-	}
-
-	var plain []byte
+// Symmetrically encrypt a plaintext given the convergence configuration and appropriate keys
+func (p *Policy) SymmetricEncryptRaw(ver int, encKey, plaintext []byte, opts keysutil.SymmetricOpts) ([]byte, error) {
+	var aead cipher.AEAD
+	var err error
+	nonce := opts.Nonce
 
 	switch p.Type {
 	case KeyType_SM4_GCM96:
-		numBytes := 16
-
-		encKey, err := p.GetKey(context, ver, numBytes)
+		// Setup the cipher
+		sm4Cipher, err := sm4.NewCipher(encKey)
 		if err != nil {
-			return "", err
-		}
-
-		if len(encKey) != numBytes {
-			return "", errutil.InternalError{Err: "could not derive enc key, length not correct"}
+			return nil, errutil.InternalError{Err: err.Error()}
 		}
 
-		plain, err = p.SymmetricDecryptRaw(encKey, decoded,
-			SymmetricOpts{
-				Convergent:        p.ConvergentEncryption,
-				ConvergentVersion: p.ConvergentVersion,
-			})
+		// Setup the GCM AEAD
+		gcm, err := cipher.NewGCM(sm4Cipher)
 		if err != nil {
-			return "", err
+			return nil, errutil.InternalError{Err: err.Error()}
 		}
-	case KeyType_ECDSA_SM2:
-		keyEntry, err := p.safeGetKeyEntry(ver)
+
+		aead = gcm
+
+	case KeyType_MANAGED_KEY:
+		if opts.Convergent || len(opts.Nonce) != 0 {
+			return nil, errutil.UserError{Err: "cannot use convergent encryption or provide a nonce to managed-key backed encryption"}
+		}
+		if opts.AEADFactory == nil {
+			return nil, errors.New("expected AEAD factory from managed key, none provided")
+		}
+		aead, err = opts.AEADFactory.GetAEAD(nonce)
 		if err != nil {
-			return "", err
+			return nil, err
 		}
-		key, err := sm2.NewPrivateKeyFromInt(keyEntry.EC_D)
-		if err != nil {
-			return "", err
-		}
-		plain, err = sm2.Decrypt(key, decoded)
-		if err != nil {
-			return "", err
-		}
-	default:
-		return "", errutil.InternalError{Err: fmt.Sprintf("unsupported key type %v", p.Type)}
 	}
 
-	return base64.StdEncoding.EncodeToString(plain), nil
+	if opts.Convergent {
+		convergentVersion := p.convergentVersion(ver)
+		switch convergentVersion {
+		case 1:
+			if len(opts.Nonce) != aead.NonceSize() {
+				return nil, errutil.UserError{Err: fmt.Sprintf("base64-decoded nonce must be %d bytes long when using convergent encryption with this key", aead.NonceSize())}
+			}
+		case 2, 3:
+			if len(opts.HMACKey) == 0 {
+				return nil, errutil.InternalError{Err: fmt.Sprintf("invalid hmac key length of zero")}
+			}
+			nonceHmac := hmac.New(sm3.New, opts.HMACKey)
+			nonceHmac.Write(plaintext)
+			nonceSum := nonceHmac.Sum(nil)
+			nonce = nonceSum[:aead.NonceSize()]
+		default:
+			return nil, errutil.InternalError{Err: fmt.Sprintf("unhandled convergent version %d", convergentVersion)}
+		}
+	} else if len(nonce) == 0 {
+		// Compute random nonce
+		nonce, err = uuid.GenerateRandomBytes(aead.NonceSize())
+		if err != nil {
+			return nil, errutil.InternalError{Err: err.Error()}
+		}
+	}
+
+	// Encrypt and tag with AEAD
+	ciphertext := aead.Seal(nil, nonce, plaintext, opts.AdditionalData)
+
+	// Place the encrypted data after the nonce
+	if !opts.Convergent || p.convergentVersion(ver) > 1 {
+		ciphertext = append(nonce, ciphertext...)
+	}
+	return ciphertext, nil
 }
 
 // Symmetrically decrypt a ciphertext given the convergence configuration and appropriate keys
-func (p *Policy) SymmetricDecryptRaw(encKey, ciphertext []byte, opts SymmetricOpts) ([]byte, error) {
+func (p *Policy) SymmetricDecryptRaw(encKey, ciphertext []byte, opts keysutil.SymmetricOpts) ([]byte, error) {
 	var aead cipher.AEAD
+	var err error
 	var nonce []byte
 
 	switch p.Type {
@@ -1180,6 +1539,12 @@ func (p *Policy) SymmetricDecryptRaw(encKey, ciphertext []byte, opts SymmetricOp
 		}
 
 		aead = gcm
+
+	case KeyType_MANAGED_KEY:
+		aead, err = opts.AEADFactory.GetAEAD(nonce)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	if len(ciphertext) < aead.NonceSize() {
@@ -1203,188 +1568,395 @@ func (p *Policy) SymmetricDecryptRaw(encKey, ciphertext []byte, opts SymmetricOp
 	return plain, nil
 }
 
-type ecdsaSignature struct {
-	R, S *big.Int
-}
+func (p *Policy) EncryptWithFactory(ver int, context, nonce []byte, value string, factories ...interface{}) (string, error) {
+	if !p.Type.EncryptionSupported() {
+		return "", errutil.UserError{Err: fmt.Sprintf("message encryption not supported for key type %v", p.Type)}
+	}
 
-func (p *Policy) Sign(ver int, input []byte, marshaling keysutil.MarshalingType) (*keysutil.SigningResult, error) {
-	if !p.Type.SigningSupported() {
-		return nil, fmt.Errorf("message signing not supported for key type %v", p.Type)
+	// Decode the plaintext value
+	plaintext, err := base64.StdEncoding.DecodeString(value)
+	if err != nil {
+		return "", errutil.UserError{Err: err.Error()}
 	}
 
 	switch {
 	case ver == 0:
 		ver = p.LatestVersion
 	case ver < 0:
-		return nil, errutil.UserError{Err: "requested version for signing is negative"}
+		return "", errutil.UserError{Err: "requested version for encryption is negative"}
 	case ver > p.LatestVersion:
-		return nil, errutil.UserError{Err: "requested version for signing is higher than the latest key version"}
-	case p.MinEncryptionVersion > 0 && ver < p.MinEncryptionVersion:
-		return nil, errutil.UserError{Err: "requested version for signing is less than the minimum encryption key version"}
+		return "", errutil.UserError{Err: "requested version for encryption is higher than the latest key version"}
+	case ver < p.MinEncryptionVersion:
+		return "", errutil.UserError{Err: "requested version for encryption is less than the minimum encryption key version"}
 	}
 
-	var sig []byte
-	var pubKey []byte
-	var err error
-	keyParams, err := p.safeGetKeyEntry(ver)
+	var ciphertext []byte
+
+	switch p.Type {
+	case KeyType_SM4_GCM96:
+		hmacKey := context
+
+		var encKey []byte
+		var deriveHMAC bool
+
+		encBytes := 16
+		hmacBytes := 0
+		convergentVersion := p.convergentVersion(ver)
+		if convergentVersion > 2 {
+			deriveHMAC = true
+			hmacBytes = 32
+			if len(nonce) > 0 {
+				return "", errutil.UserError{Err: "nonce provided when not allowed"}
+			}
+		} else if len(nonce) > 0 && (!p.ConvergentEncryption || convergentVersion != 1) {
+			return "", errutil.UserError{Err: "nonce provided when not allowed"}
+		}
+
+		key, err := p.GetKey(context, ver, encBytes+hmacBytes)
+		if err != nil {
+			return "", err
+		}
+
+		if len(key) < encBytes+hmacBytes {
+			return "", errutil.InternalError{Err: "could not derive key, length too small"}
+		}
+
+		encKey = key[:encBytes]
+		if len(encKey) != encBytes {
+			return "", errutil.InternalError{Err: "could not derive enc key, length not correct"}
+		}
+		if deriveHMAC {
+			hmacKey = key[encBytes:]
+			if len(hmacKey) != hmacBytes {
+				return "", errutil.InternalError{Err: "could not derive hmac key, length not correct"}
+			}
+		}
+		symopts := keysutil.SymmetricOpts{
+			Convergent: p.ConvergentEncryption,
+			HMACKey:    hmacKey,
+			Nonce:      nonce,
+		}
+
+		for index, rawFactory := range factories {
+			if rawFactory == nil {
+				continue
+			}
+			switch factory := rawFactory.(type) {
+			case keysutil.AEADFactory:
+				symopts.AEADFactory = factory
+			case keysutil.AssociatedDataFactory:
+				symopts.AdditionalData, err = factory.GetAssociatedData()
+				if err != nil {
+					return "", errutil.InternalError{Err: fmt.Sprintf("unable to get associated_data/additional_data from factory[%d]: %v", index, err)}
+				}
+			case keysutil.ManagedKeyFactory:
+			default:
+				return "", errutil.InternalError{Err: fmt.Sprintf("unknown type of factory[%d]: %T", index, rawFactory)}
+			}
+		}
+
+		ciphertext, err = p.SymmetricEncryptRaw(ver, encKey, plaintext, symopts)
+		if err != nil {
+			return "", err
+		}
+	case KeyType_ECDSA_SM2:
+		keyEntry, err := p.safeGetKeyEntry(ver)
+		if err != nil {
+			return "", err
+		}
+		key := &ecdsa.PublicKey{
+			Curve: sm2.P256(),
+			X:     keyEntry.EC_X,
+			Y:     keyEntry.EC_Y,
+		}
+		ciphertext, err = sm2.Encrypt(rand.Reader, key, plaintext, nil)
+
+	case KeyType_MANAGED_KEY:
+		keyEntry, err := p.safeGetKeyEntry(ver)
+		if err != nil {
+			return "", err
+		}
+
+		var aad []byte
+		var managedKeyFactory keysutil.ManagedKeyFactory
+		for _, f := range factories {
+			switch factory := f.(type) {
+			case keysutil.AssociatedDataFactory:
+				aad, err = factory.GetAssociatedData()
+				if err != nil {
+					return "", nil
+				}
+			case keysutil.ManagedKeyFactory:
+				managedKeyFactory = factory
+			}
+		}
+
+		if managedKeyFactory == nil {
+			return "", errors.New("key type is managed_key, but managed key parameters were not provided")
+		}
+
+		ciphertext, err = p.encryptWithManagedKey(managedKeyFactory.GetManagedKeyParameters(), keyEntry, plaintext, nonce, aad)
+		if err != nil {
+			return "", err
+		}
+
+	default:
+		return "", errutil.InternalError{Err: fmt.Sprintf("unsupported key type %v", p.Type)}
+	}
+
+	// Convert to base64
+	encoded := base64.StdEncoding.EncodeToString(ciphertext)
+
+	// Prepend some information
+	encoded = p.getVersionPrefix(ver) + encoded
+
+	return encoded, nil
+}
+
+func (p *Policy) KeyVersionCanBeUpdated(keyVersion int, isPrivateKey bool) error {
+	keyEntry, err := p.safeGetKeyEntry(keyVersion)
+	if err != nil {
+		return err
+	}
+
+	if !p.Type.ImportPublicKeySupported() {
+		return errors.New("provided type does not support importing key versions")
+	}
+
+	isPrivateKeyMissing := keyEntry.IsPrivateKeyMissing()
+	if isPrivateKeyMissing && !isPrivateKey {
+		return errors.New("cannot add a public key to a key version that already has a public key set")
+	}
+
+	if !isPrivateKeyMissing {
+		return errors.New("private key imported, key version cannot be updated")
+	}
+
+	return nil
+}
+
+func (p *Policy) ImportPrivateKeyForVersion(ctx context.Context, storage logical.Storage, keyVersion int, key []byte) error {
+	keyEntry, err := p.safeGetKeyEntry(keyVersion)
+	if err != nil {
+		return err
+	}
+
+	// Parse key
+	parsedPrivateKey, err := smx509.ParsePKCS8PrivateKey(key)
+	if err != nil {
+		if strings.Contains(err.Error(), "unknown elliptic curve") {
+			return fmt.Errorf("error parsing asymmetric key: %s", err)
+		}
+	}
+
+	switch parsedPrivateKey.(type) {
+	case *sm2.PrivateKey:
+		sm2Key := parsedPrivateKey.(*sm2.PrivateKey)
+		pemBlock, _ := pem.Decode([]byte(keyEntry.FormattedPublicKey))
+		if pemBlock == nil {
+			return fmt.Errorf("failed to parse key entry public key: invalid PEM blob")
+		}
+		publicKey, err := smx509.ParsePKIXPublicKey(pemBlock.Bytes)
+		if err != nil || publicKey == nil {
+			return fmt.Errorf("failed to parse key entry public key: %v", err)
+		}
+		if !publicKey.(*ecdsa.PublicKey).Equal(&sm2Key.PublicKey) {
+			return fmt.Errorf("cannot import key, key pair does not match")
+		}
+	default:
+		return fmt.Errorf("invalid key type: expected %s, got %T", p.Type, parsedPrivateKey)
+	}
+
+	err = parseFromKey(&keyEntry, p.Type, parsedPrivateKey)
+	if err != nil {
+		return err
+	}
+
+	p.Keys[strconv.Itoa(keyVersion)] = keyEntry
+
+	return p.Persist(ctx, storage)
+}
+
+func parseFromKey(ke *keysutil.KeyEntry, PolKeyType KeyType, parsedKey any) error {
+	switch parsedKey.(type) {
+	case *sm2.PrivateKey, *ecdsa.PublicKey:
+		if PolKeyType != KeyType_ECDSA_SM2 {
+			return fmt.Errorf("invalid key type: expected %s, got %T", PolKeyType, parsedKey)
+		}
+
+		curve := sm2.P256()
+		var derBytes []byte
+		var err error
+		sm2PrivateKey, ok := parsedKey.(*sm2.PrivateKey)
+
+		if ok {
+			if sm2PrivateKey.Curve != curve {
+				return fmt.Errorf("invalid curve: expected %s, got %s", curve.Params().Name, sm2PrivateKey.Curve.Params().Name)
+			}
+			ke.EC_D = sm2PrivateKey.D
+			ke.EC_X = sm2PrivateKey.X
+			ke.EC_Y = sm2PrivateKey.Y
+
+			derBytes, err = smx509.MarshalPKIXPublicKey(sm2PrivateKey.Public())
+			if err != nil {
+				return fmt.Errorf("error marshaling public key: %w", err)
+			}
+		} else {
+			ecdsaKey := parsedKey.(*ecdsa.PublicKey)
+
+			if ecdsaKey.Curve != curve {
+				return fmt.Errorf("invalid curve: expected %s, got %s", curve.Params().Name, ecdsaKey.Curve.Params().Name)
+			}
+
+			ke.EC_X = ecdsaKey.X
+			ke.EC_Y = ecdsaKey.Y
+
+			derBytes, err = smx509.MarshalPKIXPublicKey(ecdsaKey)
+			if err != nil {
+				return fmt.Errorf("error marshaling public key: %w", err)
+			}
+		}
+
+		pemBlock := &pem.Block{
+			Type:  "PUBLIC KEY",
+			Bytes: derBytes,
+		}
+		pemBytes := pem.EncodeToMemory(pemBlock)
+		if pemBytes == nil || len(pemBytes) == 0 {
+			return fmt.Errorf("error PEM-encoding public key")
+		}
+		ke.FormattedPublicKey = string(pemBytes)
+
+	default:
+		return fmt.Errorf("invalid key type: expected %s, got %T", PolKeyType, parsedKey)
+	}
+
+	return nil
+}
+
+func (p *Policy) CreateCsr(keyVersion int, csrTemplate *x509.CertificateRequest) ([]byte, error) {
+	if !p.Type.SigningSupported() {
+		return nil, errutil.UserError{Err: fmt.Sprintf("key type '%s' does not support signing", p.Type)}
+	}
+
+	keyEntry, err := p.safeGetKeyEntry(keyVersion)
 	if err != nil {
 		return nil, err
 	}
 
+	if keyEntry.IsPrivateKeyMissing() {
+		return nil, errutil.UserError{Err: "private key not imported for key version selected"}
+	}
+
+	csrTemplate.Signature = nil
+	csrTemplate.SignatureAlgorithm = x509.UnknownSignatureAlgorithm
+
+	var key crypto.Signer
 	switch p.Type {
 	case KeyType_ECDSA_SM2:
-		var curveBits int = 256
-		key := new(sm2.PrivateKey)
-		key.PublicKey = ecdsa.PublicKey{
-			Curve: sm2.P256(),
-			X:     keyParams.EC_X,
-			Y:     keyParams.EC_Y,
-		}
-		key.D = keyParams.EC_D
-
-		r, s, err := sm2.Sign(rand.Reader, &key.PrivateKey, input)
-		if err != nil {
+		if key, err = sm2.NewPrivateKeyFromInt(keyEntry.EC_D); err != nil {
 			return nil, err
 		}
 
-		switch marshaling {
-		case keysutil.MarshalingTypeASN1:
-			// This is used by openssl and X.509
-			sig, err = asn1.Marshal(ecdsaSignature{
-				R: r,
-				S: s,
-			})
-			if err != nil {
-				return nil, err
-			}
-
-		case keysutil.MarshalingTypeJWS:
-			// This is used by JWS
-
-			// First we have to get the length of the curve in bytes. Although
-			// we only support 256 now, we'll do this in an agnostic way so we
-			// can reuse this marshaling if we support e.g. 521. Getting the
-			// number of bytes without rounding up would be 65.125 so we need
-			// to add one in that case.
-			keyLen := curveBits / 8
-			if curveBits%8 > 0 {
-				keyLen++
-			}
-
-			// Now create the output array
-			sig = make([]byte, keyLen*2)
-			rb := r.Bytes()
-			sb := s.Bytes()
-			copy(sig[keyLen-len(rb):], rb)
-			copy(sig[2*keyLen-len(sb):], sb)
-
-		default:
-			return nil, errutil.UserError{Err: "requested marshaling type is invalid"}
-		}
-
 	default:
-		return nil, fmt.Errorf("unsupported key type %v", p.Type)
+		return nil, errutil.InternalError{Err: fmt.Sprintf("selected key type '%s' does not support signing", p.Type.String())}
+	}
+	csrBytes, err := smx509.CreateCertificateRequest(rand.Reader, csrTemplate, key)
+	if err != nil {
+		return nil, fmt.Errorf("could not create the cerfificate request: %w", err)
 	}
 
-	// Convert to base64
-	var encoded string
-	switch marshaling {
-	case keysutil.MarshalingTypeASN1:
-		encoded = base64.StdEncoding.EncodeToString(sig)
-	case keysutil.MarshalingTypeJWS:
-		encoded = base64.RawURLEncoding.EncodeToString(sig)
-	}
-	res := &keysutil.SigningResult{
-		Signature: p.getVersionPrefix(ver) + encoded,
-		PublicKey: pubKey,
-	}
+	pemCsr := pem.EncodeToMemory(&pem.Block{
+		Type:  "CERTIFICATE REQUEST",
+		Bytes: csrBytes,
+	})
 
-	return res, nil
+	return pemCsr, nil
 }
 
-func (p *Policy) VerifySignature(input []byte, marshaling keysutil.MarshalingType, sig string) (bool, error) {
+func (p *Policy) ValidateLeafCertKeyMatch(keyVersion int, certPublicKeyAlgorithm x509.PublicKeyAlgorithm, certPublicKey any) (bool, error) {
 	if !p.Type.SigningSupported() {
-		return false, errutil.UserError{Err: fmt.Sprintf("message verification not supported for key type %v", p.Type)}
+		return false, errutil.UserError{Err: fmt.Sprintf("key type '%s' does not support signing", p.Type)}
 	}
 
-	tplParts, err := p.getTemplateParts()
+	var keyTypeMatches bool
+	switch p.Type {
+	case KeyType_ECDSA_SM2:
+		if certPublicKeyAlgorithm == x509.ECDSA {
+			keyTypeMatches = true
+		}
+	}
+	if !keyTypeMatches {
+		return false, errutil.UserError{Err: fmt.Sprintf("provided leaf certificate public key algorithm '%s' does not match the transit key type '%s'",
+			certPublicKeyAlgorithm, p.Type)}
+	}
+
+	keyEntry, err := p.safeGetKeyEntry(keyVersion)
 	if err != nil {
 		return false, err
 	}
 
-	// Verify the prefix
-	if !strings.HasPrefix(sig, tplParts[0]) {
-		return false, errutil.UserError{Err: "invalid signature: no prefix"}
-	}
+	switch certPublicKeyAlgorithm {
+	case x509.ECDSA:
+		certPublicKey := certPublicKey.(*ecdsa.PublicKey)
 
-	splitVerSig := strings.SplitN(strings.TrimPrefix(sig, tplParts[0]), tplParts[1], 2)
-	if len(splitVerSig) != 2 {
-		return false, errutil.UserError{Err: "invalid signature: wrong number of fields"}
-	}
-
-	ver, err := strconv.Atoi(splitVerSig[0])
-	if err != nil {
-		return false, errutil.UserError{Err: "invalid signature: version number could not be decoded"}
-	}
-
-	if ver > p.LatestVersion {
-		return false, errutil.UserError{Err: "invalid signature: version is too new"}
-	}
-
-	if p.MinDecryptionVersion > 0 && ver < p.MinDecryptionVersion {
-		return false, errutil.UserError{Err: keysutil.ErrTooOld}
-	}
-
-	var sigBytes []byte
-	switch marshaling {
-	case keysutil.MarshalingTypeASN1:
-		sigBytes, err = base64.StdEncoding.DecodeString(splitVerSig[1])
-	case keysutil.MarshalingTypeJWS:
-		sigBytes, err = base64.RawURLEncoding.DecodeString(splitVerSig[1])
-	default:
-		return false, errutil.UserError{Err: "requested marshaling type is invalid"}
-	}
-	if err != nil {
-		return false, errutil.UserError{Err: "invalid base64 signature value"}
-	}
-
-	switch p.Type {
-	case KeyType_ECDSA_SM2:
-		var ecdsaSig ecdsaSignature
-
-		switch marshaling {
-		case keysutil.MarshalingTypeASN1:
-			rest, err := asn1.Unmarshal(sigBytes, &ecdsaSig)
-			if err != nil {
-				return false, errutil.UserError{Err: "supplied signature is invalid"}
-			}
-			if rest != nil && len(rest) != 0 {
-				return false, errutil.UserError{Err: "supplied signature contains extra data"}
-			}
-
-		case keysutil.MarshalingTypeJWS:
-			paramLen := len(sigBytes) / 2
-			rb := sigBytes[:paramLen]
-			sb := sigBytes[paramLen:]
-			ecdsaSig.R = new(big.Int)
-			ecdsaSig.R.SetBytes(rb)
-			ecdsaSig.S = new(big.Int)
-			ecdsaSig.S.SetBytes(sb)
-		}
-
-		keyParams, err := p.safeGetKeyEntry(ver)
-		if err != nil {
-			return false, err
-		}
-		key := &ecdsa.PublicKey{
+		publicKey := &ecdsa.PublicKey{
 			Curve: sm2.P256(),
-			X:     keyParams.EC_X,
-			Y:     keyParams.EC_Y,
+			X:     keyEntry.EC_X,
+			Y:     keyEntry.EC_Y,
 		}
 
-		return sm2.Verify(key, input, ecdsaSig.R, ecdsaSig.S), nil
+		return publicKey.Equal(certPublicKey), nil
 
-	default:
-		return false, errutil.InternalError{Err: fmt.Sprintf("unsupported key type %v", p.Type)}
+	case x509.UnknownPublicKeyAlgorithm:
+		return false, errutil.InternalError{Err: fmt.Sprint("certificate signed with an unknown algorithm")}
 	}
+
+	return false, nil
+}
+
+func (p *Policy) ValidateAndPersistCertificateChain(ctx context.Context, keyVersion int, certChain []*x509.Certificate, storage logical.Storage) error {
+	if len(certChain) == 0 {
+		return errutil.UserError{Err: "expected at least one certificate in the parsed certificate chain"}
+	}
+
+	if certChain[0].BasicConstraintsValid && certChain[0].IsCA {
+		return errutil.UserError{Err: "certificate in the first position is not a leaf certificate"}
+	}
+
+	for _, cert := range certChain[1:] {
+		if cert.BasicConstraintsValid && !cert.IsCA {
+			return errutil.UserError{Err: "provided certificate chain contains more than one leaf certificate"}
+		}
+	}
+
+	valid, err := p.ValidateLeafCertKeyMatch(keyVersion, certChain[0].PublicKeyAlgorithm, certChain[0].PublicKey)
+	if err != nil {
+		prefixedErr := fmt.Errorf("could not validate key match between leaf certificate key and key version in transit: %w", err)
+		switch err.(type) {
+		case errutil.UserError:
+			return errutil.UserError{Err: prefixedErr.Error()}
+		default:
+			return prefixedErr
+		}
+	}
+	if !valid {
+		return fmt.Errorf("leaf certificate public key does match the key version selected")
+	}
+
+	keyEntry, err := p.safeGetKeyEntry(keyVersion)
+	if err != nil {
+		return err
+	}
+
+	// Convert the certificate chain to DER format
+	derCertificates := make([][]byte, len(certChain))
+	for i, cert := range certChain {
+		derCertificates[i] = cert.Raw
+	}
+
+	keyEntry.CertificateChain = derCertificates
+
+	p.Keys[strconv.Itoa(keyVersion)] = keyEntry
+	return p.Persist(ctx, storage)
 }

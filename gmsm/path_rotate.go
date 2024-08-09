@@ -10,11 +10,24 @@ import (
 func (b *backend) pathRotate() *framework.Path {
 	return &framework.Path{
 		Pattern: "keys/" + framework.GenericNameRegex("name") + "/rotate",
+		DisplayAttrs: &framework.DisplayAttributes{
+			OperationPrefix: operationPrefix,
+			OperationVerb:   "rotate",
+			OperationSuffix: "key",
+		},		
 		Fields: map[string]*framework.FieldSchema{
 			"name": {
 				Type:        framework.TypeString,
 				Description: "Name of the key",
 			},
+			"managed_key_name": {
+				Type:        framework.TypeString,
+				Description: "The name of the managed key to use for the new version of this transit key",
+			},
+			"managed_key_id": {
+				Type:        framework.TypeString,
+				Description: "The UUID of the managed key to use for the new version of this transit key",
+			},			
 		},
 
 		Callbacks: map[logical.Operation]framework.OperationFunc{
@@ -28,6 +41,8 @@ func (b *backend) pathRotate() *framework.Path {
 
 func (b *backend) pathRotateWrite(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
 	name := d.Get("name").(string)
+	managedKeyName := d.Get("managed_key_name").(string)
+	managedKeyId := d.Get("managed_key_id").(string)
 
 	// Get the policy
 	p, _, err := b.GetPolicy(ctx, PolicyRequest{
@@ -44,11 +59,25 @@ func (b *backend) pathRotateWrite(ctx context.Context, req *logical.Request, d *
 		p.Lock(true)
 	}
 
-	// Rotate the policy
-	err = p.Rotate(ctx, req.Storage, b.GetRandomReader())
+	defer p.Unlock()
 
-	p.Unlock()
-	return nil, err
+	if p.Type == KeyType_MANAGED_KEY {
+		var keyId string
+		keyId, err = GetManagedKeyUUID(ctx, b, managedKeyName, managedKeyId)
+		if err != nil {
+			return nil, err
+		}
+		err = p.RotateManagedKey(ctx, req.Storage, keyId)
+	} else {
+		// Rotate the policy
+		err = p.Rotate(ctx, req.Storage, b.GetRandomReader())
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	return b.formatKeyPolicy(p, nil)
 }
 
 const pathRotateHelpSyn = `Rotate named encryption key`

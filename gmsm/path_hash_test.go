@@ -41,7 +41,7 @@ func TestTransit_Hash(t *testing.T) {
 			t.Fatal("no sum key found in returned data")
 		}
 		if sum.(string) != expected {
-			t.Fatal("mismatched hashes")
+			t.Fatalf("mismatched hashes, got %s, expected %s", sum, expected)
 		}
 	}
 
@@ -49,26 +49,17 @@ func TestTransit_Hash(t *testing.T) {
 	doRequest(req, false, "e2e9e396c4e75860bd806ec6f548c77b26f54a63f5f268fdc2daf17152aa0767")
 
 	// Test algorithm selection in the path
-	req.Path = "hash/sha2-224"
-	doRequest(req, false, "ea074a96cabc5a61f8298a2c470f019074642631a49e1c5e2f560865")
+	req.Path = "hash/sm3"
+	doRequest(req, false, "e2e9e396c4e75860bd806ec6f548c77b26f54a63f5f268fdc2daf17152aa0767")
 
 	// Reset and test algorithm selection in the data
 	req.Path = "hash"
-	req.Data["algorithm"] = "sha2-224"
-	doRequest(req, false, "ea074a96cabc5a61f8298a2c470f019074642631a49e1c5e2f560865")
-
-	req.Data["algorithm"] = "sha2-256"
-	doRequest(req, false, "9ecb36561341d18eb65484e833efea61edc74b84cf5e6ae1b81c63533e25fc8f")
-
-	req.Data["algorithm"] = "sha2-384"
-	doRequest(req, false, "15af9ec8be783f25c583626e9491dbf129dd6dd620466fdf05b3a1d0bb8381d30f4d3ec29f923ff1e09a0f6b337365a6")
-
-	req.Data["algorithm"] = "sha2-512"
-	doRequest(req, false, "d9d380f29b97ad6a1d92e987d83fa5a02653301e1006dd2bcd51afa59a9147e9caedaf89521abc0f0b682adcd47fb512b8343c834a32f326fe9bef00542ce887")
+	req.Data["algorithm"] = "sm3"
+	doRequest(req, false, "e2e9e396c4e75860bd806ec6f548c77b26f54a63f5f268fdc2daf17152aa0767")
 
 	// Test returning as base64
 	req.Data["format"] = "base64"
-	doRequest(req, false, "2dOA8puXrWodkumH2D+loCZTMB4QBt0rzVGvpZqRR+nK7a+JUhq8DwtoKtzUf7USuDQ8g0oy8yb+m+8AVCzohw==")
+	doRequest(req, false, "4unjlsTnWGC9gG7G9UjHeyb1SmP18mj9wtrxcVKqB2c=")
 
 	// Test bad input/format/algorithm
 	req.Data["format"] = "base92"
@@ -78,7 +69,7 @@ func TestTransit_Hash(t *testing.T) {
 	req.Data["algorithm"] = "foobar"
 	doRequest(req, true, "")
 
-	req.Data["algorithm"] = "sha2-256"
+	req.Data["algorithm"] = "sm3"
 	req.Data["input"] = "foobar"
 	doRequest(req, true, "")
 }

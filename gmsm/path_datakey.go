@@ -4,16 +4,25 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
 
 	"github.com/hashicorp/vault/sdk/framework"
 	"github.com/hashicorp/vault/sdk/helper/errutil"
+	"github.com/hashicorp/vault/sdk/helper/keysutil"
 	"github.com/hashicorp/vault/sdk/logical"
 )
 
 func (b *backend) pathDatakey() *framework.Path {
 	return &framework.Path{
 		Pattern: "datakey/" + framework.GenericNameRegex("plaintext") + "/" + framework.GenericNameRegex("name"),
+
+		DisplayAttrs: &framework.DisplayAttributes{
+			OperationPrefix: operationPrefix,
+			OperationVerb:   "generate",
+			OperationSuffix: "data-key",
+		},
+
 		Fields: map[string]*framework.FieldSchema{
 			"name": {
 				Type:        framework.TypeString,
@@ -129,7 +138,23 @@ func (b *backend) pathDatakeyWrite(ctx context.Context, req *logical.Request, d 
 		return nil, err
 	}
 
-	ciphertext, err := p.Encrypt(ver, context, nonce, base64.StdEncoding.EncodeToString(newKey))
+	var managedKeyFactory keysutil.ManagedKeyFactory
+	if p.Type == keysutil.KeyType_MANAGED_KEY {
+		managedKeySystemView, ok := b.System().(logical.ManagedKeySystemView)
+		if !ok {
+			return nil, errors.New("unsupported system view")
+		}
+
+		managedKeyFactory = ManagedKeyFactory{
+			managedKeyParams: keysutil.ManagedKeyParameters{
+				ManagedKeySystemView: managedKeySystemView,
+				BackendUUID:          b.backendUUID,
+				Context:              ctx,
+			},
+		}
+	}
+
+	ciphertext, err := p.EncryptWithFactory(ver, context, nonce, base64.StdEncoding.EncodeToString(newKey), nil, managedKeyFactory)
 	if err != nil {
 		switch err.(type) {
 		case errutil.UserError:
@@ -156,6 +181,10 @@ func (b *backend) pathDatakeyWrite(ctx context.Context, req *logical.Request, d 
 			"ciphertext":  ciphertext,
 			"key_version": keyVersion,
 		},
+	}
+
+	if len(nonce) > 0 && !nonceAllowed(p) {
+		return nil, ErrNonceNotAllowed
 	}
 
 	if plaintextAllowed {

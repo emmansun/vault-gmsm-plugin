@@ -2,13 +2,10 @@ package gmsm
 
 import (
 	"context"
-	"crypto/ed25519"
-	"encoding/base64"
-	"strings"
+	"strconv"
 	"testing"
 
 	"github.com/hashicorp/vault/sdk/logical"
-	"github.com/mitchellh/mapstructure"
 )
 
 // The outcome of processing a request includes
@@ -19,6 +16,7 @@ type signOutcome struct {
 	requestOk bool
 	valid     bool
 	keyValid  bool
+	reference string
 }
 
 func TestTransit_SignVerify(t *testing.T) {
@@ -35,6 +33,33 @@ func TestTransit_SignVerify(t *testing.T) {
 	}
 	_, err := b.HandleRequest(context.Background(), req)
 	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Now, change the key value to something we control
+	p, _, err := b.GetPolicy(context.Background(), PolicyRequest{
+		Storage: storage,
+		Name:    "foo",
+	}, b.GetRandomReader())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	keyEntry := p.Keys[strconv.Itoa(p.LatestVersion)]
+	_, ok := keyEntry.EC_X.SetString("8356e642a40ebd18d29ba3532fbd9f3bbee8f027c3f6f39a5ba2f870369f9988", 16)
+	if !ok {
+		t.Fatal("could not set X")
+	}
+	_, ok = keyEntry.EC_Y.SetString("981f5efe55d1c5cdf6c0ef2b070847a14f7fdf4272a8df09c442f3058af94ba1", 16)
+	if !ok {
+		t.Fatal("could not set Y")
+	}
+	_, ok = keyEntry.EC_D.SetString("6c5a0a0b2eed3cbec3e4f1252bfe0e28c504a1c6bf1999eebb0af9ef0f8e6c85", 16)
+	if !ok {
+		t.Fatal("could not set D")
+	}
+	p.Keys[strconv.Itoa(p.LatestVersion)] = keyEntry
+	if err = p.Persist(context.Background(), storage); err != nil {
 		t.Fatal(err)
 	}
 
@@ -128,49 +153,4 @@ func TestTransit_SignVerify(t *testing.T) {
 	// If we change marshaling back to asn1 we shouldn't be able to verify
 	delete(req.Data, "marshaling_algorithm")
 	verifyRequest(req, true, "", sig)
-}
-
-func validatePublicKey(t *testing.T, in string, sig string, pubKeyRaw []byte, expectValid bool, postpath string, b *backend) {
-	t.Helper()
-	input, _ := base64.StdEncoding.DecodeString(in)
-	splitSig := strings.Split(sig, ":")
-	signature, _ := base64.StdEncoding.DecodeString(splitSig[2])
-	valid := ed25519.Verify(ed25519.PublicKey(pubKeyRaw), input, signature)
-	if valid != expectValid {
-		t.Fatalf("status of signature: expected %v. Got %v", valid, expectValid)
-	}
-	if !valid {
-		return
-	}
-
-	keyReadReq := &logical.Request{
-		Operation: logical.ReadOperation,
-		Path:      "keys/" + postpath,
-	}
-	keyReadResp, err := b.HandleRequest(context.Background(), keyReadReq)
-	if err != nil {
-		t.Fatal(err)
-	}
-	val := keyReadResp.Data["keys"].(map[string]map[string]interface{})[strings.TrimPrefix(splitSig[1], "v")]
-	var ak asymKey
-	if err := mapstructure.Decode(val, &ak); err != nil {
-		t.Fatal(err)
-	}
-	if ak.PublicKey != "" {
-		t.Fatal("got non-empty public key")
-	}
-	keyReadReq.Data = map[string]interface{}{
-		"context": "abcd",
-	}
-	keyReadResp, err = b.HandleRequest(context.Background(), keyReadReq)
-	if err != nil {
-		t.Fatal(err)
-	}
-	val = keyReadResp.Data["keys"].(map[string]map[string]interface{})[strings.TrimPrefix(splitSig[1], "v")]
-	if err := mapstructure.Decode(val, &ak); err != nil {
-		t.Fatal(err)
-	}
-	if ak.PublicKey != base64.StdEncoding.EncodeToString(pubKeyRaw) {
-		t.Fatalf("got incorrect public key; got %q, expected %q\nasymKey struct is\n%#v", ak.PublicKey, pubKeyRaw, ak)
-	}
 }

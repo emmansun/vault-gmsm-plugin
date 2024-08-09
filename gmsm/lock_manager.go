@@ -1,3 +1,4 @@
+// Reference: https://github.com/hashicorp/vault/blob/main/sdk/helper/keysutil/lock_manager.go
 package gmsm
 
 import (
@@ -10,7 +11,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/hashicorp/errwrap"
 	"github.com/hashicorp/vault/sdk/helper/jsonutil"
 	"github.com/hashicorp/vault/sdk/helper/keysutil"
 	"github.com/hashicorp/vault/sdk/helper/locksutil"
@@ -39,6 +39,9 @@ type PolicyRequest struct {
 	// The key type
 	KeyType KeyType
 
+	// The key size for variable key size algorithms
+	KeySize int
+
 	// Whether it should be derived
 	Derived bool
 
@@ -53,6 +56,18 @@ type PolicyRequest struct {
 
 	// Whether to allow plaintext backup
 	AllowPlaintextBackup bool
+
+	// How frequently the key should automatically rotate
+	AutoRotatePeriod time.Duration
+
+	// AllowImportedKeyRotation indicates whether an imported key may be rotated by Vault
+	AllowImportedKeyRotation bool
+
+	// Indicates whether a private or public key is imported/upserted
+	IsPrivateKey bool
+
+	// The UUID of the managed key, if using one
+	ManagedKeyUUID string
 }
 
 type LockManager struct {
@@ -73,7 +88,7 @@ func NewLockManager(useCache bool, cacheSize int) (*LockManager, error) {
 	case cacheSize > 0:
 		newLRUCache, err := keysutil.NewTransitLRU(cacheSize)
 		if err != nil {
-			return nil, errwrap.Wrapf("failed to create cache: {{err}}", err)
+			return nil, fmt.Errorf("failed to create cache: %w", err)
 		}
 		cache = newLRUCache
 	}
@@ -114,7 +129,7 @@ func (lm *LockManager) InitCache(cacheSize int) error {
 		case cacheSize > 0:
 			newLRUCache, err := keysutil.NewTransitLRU(cacheSize)
 			if err != nil {
-				return errwrap.Wrapf("failed to create cache: {{err}}", err)
+				return fmt.Errorf("failed to create cache: %v", err)
 			}
 			lm.cache = newLRUCache
 		}
@@ -199,7 +214,7 @@ func (lm *LockManager) RestorePolicy(ctx context.Context, storage logical.Storag
 	if keyData.ArchivedKeys != nil {
 		err = keyData.Policy.storeArchive(ctx, storage, keyData.ArchivedKeys)
 		if err != nil {
-			return errwrap.Wrapf(fmt.Sprintf("failed to restore archived keys for key %q: {{err}}", name), err)
+			return fmt.Errorf("failed to restore archived keys for key %q: %w", name, err)
 		}
 	}
 
@@ -212,7 +227,7 @@ func (lm *LockManager) RestorePolicy(ctx context.Context, storage logical.Storag
 	// Restore the policy. This will also attempt to adjust the archive.
 	err = keyData.Policy.Persist(ctx, storage)
 	if err != nil {
-		return errwrap.Wrapf(fmt.Sprintf("failed to restore the policy %q: {{err}}", name), err)
+		return fmt.Errorf("failed to restore the policy %q: %w", name, err)
 	}
 
 	keyData.Policy.l = new(sync.RWMutex)
@@ -359,6 +374,24 @@ func (lm *LockManager) GetPolicy(ctx context.Context, req PolicyRequest, rand io
 				return nil, false, fmt.Errorf("key derivation and convergent encryption not supported for keys of type %v", req.KeyType)
 			}
 
+		case KeyType_HMAC:
+			if req.Derived || req.Convergent {
+				cleanup()
+				return nil, false, fmt.Errorf("key derivation and convergent encryption not supported for keys of type %v", req.KeyType)
+			}
+
+		case KeyType_MANAGED_KEY:
+			if req.Derived || req.Convergent {
+				cleanup()
+				return nil, false, fmt.Errorf("key derivation and convergent encryption not supported for keys of type %v", req.KeyType)
+			}
+
+		case KeyType_SM4_CMAC:
+			if req.Derived || req.Convergent {
+				cleanup()
+				return nil, false, fmt.Errorf("key derivation and convergent encryption not supported for keys of type %v", req.KeyType)
+			}
+
 		default:
 			cleanup()
 			return nil, false, fmt.Errorf("unsupported key type %v", req.KeyType)
@@ -374,7 +407,7 @@ func (lm *LockManager) GetPolicy(ctx context.Context, req PolicyRequest, rand io
 		}
 
 		if req.Derived {
-			p.KDF = Kdf_hkdf_sha256
+			p.KDF = Kdf_hkdf_sm3
 			if req.Convergent {
 				p.ConvergentEncryption = true
 				// As of version 3 we store the version within each key, so we
@@ -426,6 +459,62 @@ func (lm *LockManager) GetPolicy(ctx context.Context, req PolicyRequest, rand io
 	return
 }
 
+func (lm *LockManager) ImportPolicy(ctx context.Context, req PolicyRequest, key []byte, rand io.Reader) error {
+	var p *Policy
+	var err error
+	var ok bool
+	var pRaw interface{}
+
+	// Check if it's in our cache
+	if lm.useCache {
+		pRaw, ok = lm.cache.Load(req.Name)
+	}
+	if ok {
+		p = pRaw.(*Policy)
+		if atomic.LoadUint32(&p.deleted) == 1 {
+			return nil
+		}
+	}
+
+	// We're not using the cache, or it wasn't found; get an exclusive lock.
+	// This ensures that any other process writing the actual storage will be
+	// finished before we load from storage.
+	lock := locksutil.LockForKey(lm.keyLocks, req.Name)
+	lock.Lock()
+	defer lock.Unlock()
+
+	// Load it from storage
+	p, err = lm.getPolicyFromStorage(ctx, req.Storage, req.Name)
+	if err != nil {
+		return err
+	}
+
+	if p == nil {
+		p = &Policy{
+			l:                        new(sync.RWMutex),
+			Name:                     req.Name,
+			Type:                     req.KeyType,
+			Derived:                  req.Derived,
+			Exportable:               req.Exportable,
+			AllowPlaintextBackup:     req.AllowPlaintextBackup,
+			AutoRotatePeriod:         req.AutoRotatePeriod,
+			AllowImportedKeyRotation: req.AllowImportedKeyRotation,
+			Imported:                 true,
+		}
+	}
+
+	err = p.ImportPublicOrPrivate(ctx, req.Storage, key, req.IsPrivateKey, rand)
+	if err != nil {
+		return fmt.Errorf("error importing key: %s", err)
+	}
+
+	if lm.useCache {
+		lm.cache.Store(req.Name, p)
+	}
+
+	return nil
+}
+
 func (lm *LockManager) DeletePolicy(ctx context.Context, storage logical.Storage, name string) error {
 	var p *Policy
 	var err error
@@ -470,12 +559,12 @@ func (lm *LockManager) DeletePolicy(ctx context.Context, storage logical.Storage
 
 	err = storage.Delete(ctx, "policy/"+name)
 	if err != nil {
-		return errwrap.Wrapf(fmt.Sprintf("error deleting key %q: {{err}}", name), err)
+		return fmt.Errorf("error deleting key %q: %w", name, err)
 	}
 
 	err = storage.Delete(ctx, "archive/"+name)
 	if err != nil {
-		return errwrap.Wrapf(fmt.Sprintf("error deleting key %q archive: {{err}}", name), err)
+		return fmt.Errorf("error deleting key %q archive: %w", name, err)
 	}
 
 	return nil

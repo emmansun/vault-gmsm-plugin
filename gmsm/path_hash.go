@@ -2,8 +2,6 @@ package gmsm
 
 import (
 	"context"
-	"crypto/sha256"
-	"crypto/sha512"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
@@ -17,6 +15,12 @@ import (
 func (b *backend) pathHash() *framework.Path {
 	return &framework.Path{
 		Pattern: "hash" + framework.OptionalParamRegex("urlalgorithm"),
+		DisplayAttrs: &framework.DisplayAttributes{
+			OperationPrefix: operationPrefix,
+			OperationVerb:   "hash",
+			OperationSuffix: "|with-algorithm",
+		},
+
 		Fields: map[string]*framework.FieldSchema{
 			"input": {
 				Type:        framework.TypeString,
@@ -28,10 +32,6 @@ func (b *backend) pathHash() *framework.Path {
 				Default: "sm3",
 				Description: `Algorithm to use (POST body parameter). Valid values are:
 * sm3
-* sha2-224
-* sha2-256
-* sha2-384
-* sha2-512
 Defaults to "sm3".`,
 			},
 
@@ -57,7 +57,14 @@ Defaults to "sm3".`,
 }
 
 func (b *backend) pathHashWrite(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
-	inputB64 := d.Get("input").(string)
+	rawInput, ok, err := d.GetOkErr("input")
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return logical.ErrorResponse("input missing"), logical.ErrInvalidRequest
+	}
+	inputB64 := rawInput.(string)
 	format := d.Get("format").(string)
 	algorithm := d.Get("urlalgorithm").(string)
 	if algorithm == "" {
@@ -80,14 +87,6 @@ func (b *backend) pathHashWrite(ctx context.Context, req *logical.Request, d *fr
 	switch algorithm {
 	case "sm3":
 		hf = sm3.New()
-	case "sha2-224":
-		hf = sha256.New224()
-	case "sha2-256":
-		hf = sha256.New()
-	case "sha2-384":
-		hf = sha512.New384()
-	case "sha2-512":
-		hf = sha512.New()
 	default:
 		return logical.ErrorResponse(fmt.Sprintf("unsupported algorithm %s", algorithm)), nil
 	}

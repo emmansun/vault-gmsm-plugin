@@ -16,6 +16,7 @@ import (
 	"github.com/hashicorp/vault/sdk/framework"
 	"github.com/hashicorp/vault/sdk/helper/keysutil"
 	"github.com/hashicorp/vault/sdk/logical"
+	"github.com/stretchr/testify/require"
 )
 
 const (
@@ -271,8 +272,8 @@ func testDerivedKeyUpgrade(t *testing.T, keyType KeyType) {
 	p.MigrateKeyToKeysMap()
 	p.Upgrade(context.Background(), storage, cryptoRand.Reader) // Need to run the upgrade code to make the migration stick
 
-	if p.KDF != Kdf_hmac_sha256_counter {
-		t.Fatalf("bad KDF value by default; counter val is %d, KDF val is %d, policy is %#v", Kdf_hmac_sha256_counter, p.KDF, *p)
+	if p.KDF != Kdf_hmac_sm3_counter {
+		t.Fatalf("bad KDF value by default; counter val is %d, KDF val is %d, policy is %#v", Kdf_hmac_sm3_counter, p.KDF, *p)
 	}
 
 	derBytesOld, err := p.GetKey(keyContext, 1, 0)
@@ -289,7 +290,7 @@ func testDerivedKeyUpgrade(t *testing.T, keyType KeyType) {
 		t.Fatal("mismatch of same context alg")
 	}
 
-	p.KDF = Kdf_hkdf_sha256
+	p.KDF = Kdf_hkdf_sm3
 	if p.NeedsUpgrade() {
 		t.Fatal("expected no upgrade needed")
 	}
@@ -329,6 +330,7 @@ func testConvergentEncryptionCommon(t *testing.T, ver int, keyType KeyType) {
 		Data: map[string]interface{}{
 			"derived":               false,
 			"convergent_encryption": true,
+			"type":                  keyType.String(),
 		},
 	}
 	resp, err := b.HandleRequest(context.Background(), req)
@@ -349,15 +351,14 @@ func testConvergentEncryptionCommon(t *testing.T, ver int, keyType KeyType) {
 		Data: map[string]interface{}{
 			"derived":               true,
 			"convergent_encryption": true,
+			"type":                  keyType.String(),
 		},
 	}
 	resp, err = b.HandleRequest(context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp != nil {
-		t.Fatal("expected nil response")
-	}
+	require.NotNil(t, resp, "expected populated request")
 
 	p, err := keysutil.LoadPolicy(context.Background(), storage, path.Join("policy", "testkey"))
 	if err != nil {
@@ -438,9 +439,11 @@ func testConvergentEncryptionCommon(t *testing.T, ver int, keyType KeyType) {
 
 	// Now test encrypting the same value twice
 	req.Data = map[string]interface{}{
-		"plaintext": "emlwIHphcA==",     // "zip zap"
-		"nonce":     "b25ldHdvdGhyZWVl", // "onetwothreee"
+		"plaintext": "emlwIHphcA==", // "zip zap"
 		"context":   "pWZ6t/im3AORd0lVYE0zBdKpX6Bl3/SvFtoVTPWbdkzjG788XmMAnOlxandSdd7S",
+	}
+	if ver == 0 {
+		req.Data["nonce"] = "b25ldHdvdGhyZWVl" // "onetwothreee"
 	}
 	resp, err = b.HandleRequest(context.Background(), req)
 	if err != nil {
@@ -472,11 +475,10 @@ func testConvergentEncryptionCommon(t *testing.T, ver int, keyType KeyType) {
 
 	// For sanity, also check a different nonce value...
 	req.Data = map[string]interface{}{
-		"plaintext": "emlwIHphcA==",     // "zip zap"
-		"nonce":     "dHdvdGhyZWVmb3Vy", // "twothreefour"
+		"plaintext": "emlwIHphcA==", // "zip zap"
 		"context":   "pWZ6t/im3AORd0lVYE0zBdKpX6Bl3/SvFtoVTPWbdkzjG788XmMAnOlxandSdd7S",
 	}
-	if ver < 2 {
+	if ver == 0 {
 		req.Data["nonce"] = "dHdvdGhyZWVmb3Vy" // "twothreefour"
 	} else {
 		req.Data["context"] = "pWZ6t/im3AORd0lVYE0zBdKpX6Bl3/SvFtoVTPWbdkzjG788XmMAnOldandSdd7S"
@@ -515,9 +517,11 @@ func testConvergentEncryptionCommon(t *testing.T, ver int, keyType KeyType) {
 
 	// ...and a different context value
 	req.Data = map[string]interface{}{
-		"plaintext": "emlwIHphcA==",     // "zip zap"
-		"nonce":     "dHdvdGhyZWVmb3Vy", // "twothreefour"
+		"plaintext": "emlwIHphcA==", // "zip zap"
 		"context":   "qV4h9iQyvn+raODOer4JNAsOhkXBwdT4HZ677Ql4KLqXSU+Jk4C/fXBWbv6xkSYT",
+	}
+	if ver == 0 {
+		req.Data["nonce"] = "dHdvdGhyZWVmb3Vy" // "twothreefour"
 	}
 	resp, err = b.HandleRequest(context.Background(), req)
 	if err != nil {
@@ -630,8 +634,10 @@ func testConvergentEncryptionCommon(t *testing.T, ver int, keyType KeyType) {
 	// Finally, check operations on empty values
 	// First, check without setting a plaintext at all
 	req.Data = map[string]interface{}{
-		"nonce":   "b25ldHdvdGhyZWVl", // "onetwothreee"
 		"context": "pWZ6t/im3AORd0lVYE0zBdKpX6Bl3/SvFtoVTPWbdkzjG788XmMAnOlxandSdd7S",
+	}
+	if ver == 0 {
+		req.Data["nonce"] = "dHdvdGhyZWVmb3Vy" // "twothreefour"
 	}
 	resp, err = b.HandleRequest(context.Background(), req)
 	if err == nil {
@@ -647,8 +653,10 @@ func testConvergentEncryptionCommon(t *testing.T, ver int, keyType KeyType) {
 	// Now set plaintext to empty
 	req.Data = map[string]interface{}{
 		"plaintext": "",
-		"nonce":     "b25ldHdvdGhyZWVl", // "onetwothreee"
 		"context":   "pWZ6t/im3AORd0lVYE0zBdKpX6Bl3/SvFtoVTPWbdkzjG788XmMAnOlxandSdd7S",
+	}
+	if ver == 0 {
+		req.Data["nonce"] = "dHdvdGhyZWVmb3Vy" // "twothreefour"
 	}
 	resp, err = b.HandleRequest(context.Background(), req)
 	if err != nil {
@@ -811,7 +819,7 @@ func testPolicyFuzzingCommon(t *testing.T, be *backend) {
 				// keys start at version 1 so we want [1, latestVersion] not [0, latestVersion)
 				setVersion := (rand.Int() % latestVersion) + 1
 				fd.Raw["min_decryption_version"] = setVersion
-				fd.Schema = be.pathConfig().Fields
+				fd.Schema = be.pathKeysConfig().Fields
 				resp, err = be.pathConfigWrite(context.Background(), req, fd)
 				if err != nil {
 					t.Errorf("got an error setting min decryption version: %v", err)
@@ -843,9 +851,7 @@ func TestBadInput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp != nil {
-		t.Fatal("expected nil response")
-	}
+	require.NotNil(t, resp, "expected populated request")
 
 	req.Path = "decrypt/test"
 	req.Data = map[string]interface{}{
