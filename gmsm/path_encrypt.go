@@ -404,14 +404,14 @@ func (b *backend) pathEncryptWrite(ctx context.Context, req *logical.Request, d 
 		if convergent && !contextSet {
 			return logical.ErrorResponse("convergent encryption requires derivation to be enabled, so context is required"), nil
 		}
-		/*
-			cfg, err := b.readConfigKeys(ctx, req)
-			if err != nil {
-				return nil, err
-			}
-		*/
+
+		cfg, err := b.readConfigKeys(ctx, req)
+		if err != nil {
+			return nil, err
+		}
+
 		polReq = PolicyRequest{
-			Upsert:     true,
+			Upsert:     !cfg.DisableUpsert,
 			Storage:    req.Storage,
 			Name:       name,
 			Derived:    contextSet,

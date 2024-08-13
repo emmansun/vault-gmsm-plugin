@@ -115,11 +115,11 @@ key.`,
 			},
 			"managed_key_name": {
 				Type:        framework.TypeString,
-				Description: "The name of the managed key to use for this transit key",
+				Description: "The name of the managed key to use for this gmsm transit key",
 			},
 			"managed_key_id": {
 				Type:        framework.TypeString,
-				Description: "The UUID of the managed key to use for this transit key",
+				Description: "The UUID of the managed key to use for this gmsm transit key",
 			},
 		},
 

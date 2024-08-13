@@ -64,15 +64,23 @@ func (b *backend) pathPolicyExportRead(ctx context.Context, req *logical.Request
 	name := d.Get("name").(string)
 	version := d.Get("version").(string)
 
+	supportExport := true
 	switch exportType {
 	case exportTypeEncryptionKey:
 	case exportTypeSigningKey:
 	case exportTypeHMACKey:
 	case exportTypeCMACKey:
 		// this is enterprise function only
-		return logical.ErrorResponse(ErrCmacEntOnly.Error()), logical.ErrInvalidRequest
+		supportExport = false
+	case exportTypePublicKey:
+	case exportTypeCertificateChain:
+		supportExport = true
 	default:
 		return logical.ErrorResponse(fmt.Sprintf("invalid export type: %s", exportType)), logical.ErrInvalidRequest
+	}
+
+	if !supportExport {
+		return logical.ErrorResponse(ErrCmacEntOnly.Error()), logical.ErrInvalidRequest
 	}
 
 	p, _, err := b.GetPolicy(ctx, PolicyRequest{
@@ -90,8 +98,8 @@ func (b *backend) pathPolicyExportRead(ctx context.Context, req *logical.Request
 	}
 	defer p.Unlock()
 
-	if !p.Exportable {
-		return logical.ErrorResponse("key is not exportable"), nil
+	if !p.Exportable && exportType != exportTypePublicKey && exportType != exportTypeCertificateChain {
+		return logical.ErrorResponse("private key material is not exportable"), nil
 	}
 
 	switch exportType {
@@ -216,7 +224,7 @@ func getExportKey(policy *Policy, key *keysutil.KeyEntry, exportType string) (st
 		switch policy.Type {
 		case KeyType_SM4_CMAC:
 			return strings.TrimSpace(base64.StdEncoding.EncodeToString(key.Key)), nil
-		}		
+		}
 	}
 
 	return "", fmt.Errorf("unknown key type %v", policy.Type)

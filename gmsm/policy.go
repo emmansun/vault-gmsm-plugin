@@ -1887,7 +1887,7 @@ func (p *Policy) ValidateLeafCertKeyMatch(keyVersion int, certPublicKeyAlgorithm
 		}
 	}
 	if !keyTypeMatches {
-		return false, errutil.UserError{Err: fmt.Sprintf("provided leaf certificate public key algorithm '%s' does not match the transit key type '%s'",
+		return false, errutil.UserError{Err: fmt.Sprintf("provided leaf certificate public key algorithm '%s' does not match the gmsm transit key type '%s'",
 			certPublicKeyAlgorithm, p.Type)}
 	}
 
@@ -1932,7 +1932,7 @@ func (p *Policy) ValidateAndPersistCertificateChain(ctx context.Context, keyVers
 
 	valid, err := p.ValidateLeafCertKeyMatch(keyVersion, certChain[0].PublicKeyAlgorithm, certChain[0].PublicKey)
 	if err != nil {
-		prefixedErr := fmt.Errorf("could not validate key match between leaf certificate key and key version in transit: %w", err)
+		prefixedErr := fmt.Errorf("could not validate key match between leaf certificate key and key version in gmsm transit: %w", err)
 		switch err.(type) {
 		case errutil.UserError:
 			return errutil.UserError{Err: prefixedErr.Error()}

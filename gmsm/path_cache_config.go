@@ -83,7 +83,7 @@ func (b *backend) pathCacheConfigRead(ctx context.Context, req *logical.Request,
 	// error if no cache is configured
 	if !b.lm.GetUseCache() {
 		return nil, errors.New(
-			"caching is disabled for this transit mount",
+			"caching is disabled for this gmsm transit mount",
 		)
 	}
 
@@ -101,7 +101,7 @@ func (b *backend) pathCacheConfigRead(ctx context.Context, req *logical.Request,
 	}
 
 	if currentCacheSize != storedCacheSize {
-		resp.Warnings = []string{"This cache size will not be applied until the transit mount is reloaded"}
+		resp.Warnings = []string{"This cache size will not be applied until the gmsm transit mount is reloaded"}
 	}
 
 	return resp, nil

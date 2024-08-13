@@ -25,6 +25,8 @@ Data sent to the backend are not stored.
 const (
 	operationPrefix = "gmsm"
 
+	version = "v0.5.0"
+
 	// Minimum cache size for transit backend
 	minCacheSize = 10
 )
@@ -61,11 +63,10 @@ func Backend(ctx context.Context, conf *logical.BackendConfig) (*backend, error)
 			b.pathKeys(),
 			b.pathListKeys(),
 			b.pathExportKeys(),
-			b.pathEncrypt(),
 			b.pathKeysConfig(),
+			b.pathEncrypt(),
 			b.pathDecrypt(),
 			b.pathDatakey(),
-			//b.pathRandom(),
 			b.pathHash(),
 			b.pathHMAC(),
 			b.pathSign(),
@@ -74,11 +75,13 @@ func Backend(ctx context.Context, conf *logical.BackendConfig) (*backend, error)
 			b.pathRestore(),
 			b.pathTrim(),
 			b.pathCacheConfig(),
+			b.pathConfigKeys(),
 		},
 
 		Secrets:        []*framework.Secret{},
 		Invalidate:     b.invalidate,
 		BackendType:    logical.TypeLogical,
+		RunningVersion: version,
 		PeriodicFunc:   b.periodicFunc,
 		InitializeFunc: b.initialize,
 		Clean:          b.cleanup,
@@ -106,6 +109,8 @@ func Backend(ctx context.Context, conf *logical.BackendConfig) (*backend, error)
 	if err != nil {
 		return nil, err
 	}
+
+	b.setupEnt()
 
 	return &b, nil
 }

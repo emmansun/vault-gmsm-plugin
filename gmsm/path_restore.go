@@ -49,7 +49,7 @@ func (b *backend) pathRestoreUpdate(ctx context.Context, req *logical.Request, d
 		return logical.ErrorResponse("'backup' must be supplied"), nil
 	}
 
-	// If a name is given, make sure it does not contain any slashes. The Transit
+	// If a name is given, make sure it does not contain any slashes. The GMSM Transit
 	// secret engine does not allow sub-paths in key names
 	keyName := d.Get("name").(string)
 	if strings.Contains(keyName, "/") {
