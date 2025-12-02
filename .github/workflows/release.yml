@@ -20,14 +20,14 @@ jobs:
             goos: windows
     steps:
     - uses: actions/checkout@v4
-    - uses: wangyoucao577/go-release-action@v1.38
+    - uses: wangyoucao577/go-release-action@v1.53
       env:
         CGO_ENABLED: 0
       with:
         github_token: ${{ secrets.GITHUB_TOKEN }}
         goos: ${{ matrix.goos }}
         goarch: ${{ matrix.goarch }}
-        goversion: "1.19"
+        goversion: "1.24"
         sha256sum: true
         md5sum: false
         
