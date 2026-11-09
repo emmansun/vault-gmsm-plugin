@@ -1005,7 +1005,13 @@ func (p *Policy) SignWithOptions(ver int, context, input []byte, options *Signin
 		if options.Prehashed {
 			r, s, err = sm2.Sign(rand.Reader, &key.PrivateKey, input)
 		} else {
-			r, s, err = sm2.SignWithSM2(rand.Reader, &key.PrivateKey, options.UID, input)
+			// gmsm v0.45 removed SignWithSM2, the SM2 Z value digest has to be
+			// calculated before signing the raw input.
+			var digest []byte
+			if digest, err = sm2.CalculateSM2Hash(&key.PublicKey, input, options.UID); err != nil {
+				return nil, err
+			}
+			r, s, err = sm2.Sign(rand.Reader, &key.PrivateKey, digest)
 		}
 		if err != nil {
 			return nil, err
@@ -1151,7 +1157,13 @@ func (p *Policy) VerifySignatureWithOptions(context, input []byte, sig string, o
 		if options.Prehashed {
 			return sm2.Verify(key, input, ecdsaSig.R, ecdsaSig.S), nil
 		}
-		return sm2.VerifyWithSM2(key, options.UID, input, ecdsaSig.R, ecdsaSig.S), nil
+		// gmsm v0.45 removed VerifyWithSM2, the SM2 Z value digest has to be
+		// calculated before verifying the raw input.
+		digest, err := sm2.CalculateSM2Hash(key, input, options.UID)
+		if err != nil {
+			return false, err
+		}
+		return sm2.Verify(key, digest, ecdsaSig.R, ecdsaSig.S), nil
 
 	default:
 		return false, errutil.InternalError{Err: fmt.Sprintf("unsupported key type %v", p.Type)}
@@ -1861,7 +1873,7 @@ func (p *Policy) CreateCsr(keyVersion int, csrTemplate *x509.CertificateRequest)
 	default:
 		return nil, errutil.InternalError{Err: fmt.Sprintf("selected key type '%s' does not support signing", p.Type.String())}
 	}
-	csrBytes, err := smx509.CreateCertificateRequest(rand.Reader, csrTemplate, key)
+	csrBytes, err := smx509.CreateCertificateRequest(rand.Reader, toSMX509CertificateRequest(csrTemplate), key)
 	if err != nil {
 		return nil, fmt.Errorf("could not create the cerfificate request: %w", err)
 	}
@@ -1872,6 +1884,24 @@ func (p *Policy) CreateCsr(keyVersion int, csrTemplate *x509.CertificateRequest)
 	})
 
 	return pemCsr, nil
+}
+
+// toSMX509CertificateRequest maps a standard library certificate request template
+// onto the smx509 template type used by smx509.CreateCertificateRequest. Only the
+// fields consumed when building a CSR are copied; the signature algorithm is left
+// unset so smx509 picks SM2WithSM3 for SM2 keys.
+func toSMX509CertificateRequest(template *x509.CertificateRequest) *smx509.CertificateRequest {
+	return &smx509.CertificateRequest{
+		SignatureAlgorithm: smx509.UnknownSignatureAlgorithm,
+		Subject:            template.Subject,
+		DNSNames:           template.DNSNames,
+		EmailAddresses:     template.EmailAddresses,
+		IPAddresses:        template.IPAddresses,
+		URIs:               template.URIs,
+		Attributes:         template.Attributes,
+		Extensions:         template.Extensions,
+		ExtraExtensions:    template.ExtraExtensions,
+	}
 }
 
 func (p *Policy) ValidateLeafCertKeyMatch(keyVersion int, certPublicKeyAlgorithm x509.PublicKeyAlgorithm, certPublicKey any) (bool, error) {

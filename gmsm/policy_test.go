@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"reflect"
 	"strconv"
 	"strings"
@@ -780,6 +783,48 @@ func Test_Import(t *testing.T) {
 				t.Fatalf("error importing key: %s", err)
 			}
 		})
+	}
+}
+
+func TestPolicy_CreateCsr(t *testing.T) {
+	ctx := context.Background()
+	lm, _ := NewLockManager(true, 0)
+	storage := &logical.InmemStorage{}
+	p, _, err := lm.GetPolicy(ctx, PolicyRequest{
+		Upsert:  true,
+		Storage: storage,
+		KeyType: KeyType_ECDSA_SM2,
+		Name:    "test-sm2-csr",
+	}, rand.Reader)
+	if err != nil {
+		t.Fatalf("error creating policy: %s", err)
+	}
+
+	template := &x509.CertificateRequest{
+		Subject:  pkix.Name{CommonName: "vault-gmsm-plugin", Organization: []string{"test"}},
+		DNSNames: []string{"gmsm.example.com"},
+	}
+	pemCsr, err := p.CreateCsr(1, template)
+	if err != nil {
+		t.Fatalf("error creating csr: %s", err)
+	}
+
+	block, _ := pem.Decode(pemCsr)
+	if block == nil || block.Type != "CERTIFICATE REQUEST" {
+		t.Fatalf("unexpected pem block: %v", block)
+	}
+	csr, err := smx509.ParseCertificateRequest(block.Bytes)
+	if err != nil {
+		t.Fatalf("error parsing csr: %s", err)
+	}
+	if err := csr.CheckSignature(); err != nil {
+		t.Fatalf("csr signature check failed: %s", err)
+	}
+	if csr.Subject.CommonName != "vault-gmsm-plugin" {
+		t.Fatalf("unexpected common name: %s", csr.Subject.CommonName)
+	}
+	if len(csr.DNSNames) != 1 || csr.DNSNames[0] != "gmsm.example.com" {
+		t.Fatalf("unexpected dns names: %v", csr.DNSNames)
 	}
 }
 

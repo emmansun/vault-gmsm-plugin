@@ -12,22 +12,30 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        # build and publish in parallel: linux/amd64, linux/arm64, windows/amd64, darwin/amd64, darwin/arm64
+        # build and publish in parallel: linux/amd64, linux/arm64, linux/riscv64, linux/loong64,
+        # windows/amd64, darwin/amd64, darwin/arm64
         goos: [linux, windows, darwin]
         goarch: [amd64, arm64]
         exclude:
           - goarch: arm64
             goos: windows
+        # riscv64 and loong64 are linux only, so they are added explicitly instead of
+        # extending goarch (which would also generate windows/darwin combinations).
+        include:
+          - goos: linux
+            goarch: riscv64
+          - goos: linux
+            goarch: loong64
     steps:
-    - uses: actions/checkout@v5
-    - uses: wangyoucao577/go-release-action@v1.53
+    - uses: actions/checkout@v7
+    - uses: wangyoucao577/go-release-action@v1.55
       env:
         CGO_ENABLED: 0
       with:
         github_token: ${{ secrets.GITHUB_TOKEN }}
         goos: ${{ matrix.goos }}
         goarch: ${{ matrix.goarch }}
-        goversion: "1.25"
+        goversion: "1.27"
         sha256sum: true
         md5sum: false
         
