@@ -13,6 +13,11 @@
 1. Build the plugin, open command window and go to vault-gmsm-plugin/scripts folder, run build.bat
 2. Copy vault-gmsm-plugin.exe to your vault plugin folder
 3. Start the vault `vault server -dev -dev-root-token-id=root -dev-plugin-dir=./plugins`
+   > **Vault 2.x**: start with an **empty** plugin folder and copy the plugin in only after the server is up, i.e. swap
+   > steps 2 and 3. Vault 2.x dev mode probes every binary in `-dev-plugin-dir` at startup and aborts when it is not a
+   > database plugin (`Error enabling plugin ...: failed to load plugin as database v5: ... Failed to read any lines from
+   > plugin's stdout`). Older Vault builds without that check still accept the original order, and the register/enable
+   > steps below are the same either way.
 4. Set environment variables: 
    - set VAULT_ADDR=http://127.0.0.1:8200 
    - set VAULT_TOKEN=root
