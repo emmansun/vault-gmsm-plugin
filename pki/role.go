@@ -491,8 +491,11 @@ func applyRoleFields(role *roleEntry, d *framework.FieldData) {
 // validateRole refuses a policy that cannot produce a certificate, so the
 // mistake is reported where it was made rather than at the first request.
 func validateRole(role *roleEntry) error {
-	if role.IssuerRef != "" && role.IssuerRef != "default" {
-		return fmt.Errorf("issuer_ref %q is not available; this mount holds a single issuer named default", role.IssuerRef)
+	// Whether the ref names an issuer is a question about the mount rather than
+	// about the role, and an operator may write the role before the authority it
+	// names is there, so the ref is resolved when a certificate is issued.
+	if role.IssuerRef != strings.TrimSpace(role.IssuerRef) || strings.Contains(role.IssuerRef, "/") {
+		return fmt.Errorf("issuer_ref %q cannot contain a slash or a leading or trailing space", role.IssuerRef)
 	}
 	if role.TTL <= 0 {
 		return errors.New("ttl must be positive")

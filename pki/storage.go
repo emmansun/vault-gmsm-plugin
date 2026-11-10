@@ -39,6 +39,9 @@ type issuerIndex struct {
 // issuerEntry is the certificate the mount signs with, the chain above it and
 // the key that belongs to it.
 type issuerEntry struct {
+	// ID is the storage key of the record. It is not written into it, because
+	// the key already says what it is.
+	ID          string    `json:"-"`
 	Certificate []byte    `json:"certificate"`
 	Chain       [][]byte  `json:"chain,omitempty"`
 	KeyID       string    `json:"key_id"`
@@ -87,6 +90,7 @@ type keyEntry struct {
 type certEntry struct {
 	Certificate []byte    `json:"certificate,omitempty"`
 	Role        string    `json:"role,omitempty"`
+	IssuerID    string    `json:"issuer_id,omitempty"`
 	Issued      time.Time `json:"issued"`
 	Expiration  time.Time `json:"expiration"`
 }
@@ -160,7 +164,54 @@ func (b *backend) issuer(ctx context.Context, s logical.Storage) (*issuerEntry, 
 }
 
 func (b *backend) issuerByID(ctx context.Context, s logical.Storage, id string) (*issuerEntry, error) {
-	return getJSON[issuerEntry](ctx, s, issuerPrefix+id)
+	issuer, err := getJSON[issuerEntry](ctx, s, issuerPrefix+id)
+	if err != nil || issuer == nil {
+		return issuer, err
+	}
+
+	issuer.ID = id
+	return issuer, nil
+}
+
+// issuerByRef resolves what a role or a path names to one issuer record: the
+// word default, the identifier of a record or the name an operator gave it. It
+// answers with nothing but no error when the mount holds no authority at all,
+// because that is a different mistake from naming an issuer that is not there.
+func (b *backend) issuerByRef(ctx context.Context, s logical.Storage, ref string) (string, *issuerEntry, error) {
+	ref = strings.TrimSpace(ref)
+	if ref == "" || ref == issuerRefDefault {
+		id, err := b.issuerID(ctx, s)
+		if err != nil || id == "" {
+			return "", nil, err
+		}
+
+		issuer, err := b.issuerByID(ctx, s, id)
+		return id, issuer, err
+	}
+
+	issuer, err := b.issuerByID(ctx, s, ref)
+	if err != nil || issuer != nil {
+		return ref, issuer, err
+	}
+
+	// A ref is either an identifier or a name, and names are looked up by
+	// reading the records: there are few issuers, and an index would be one
+	// more thing to keep in step with them.
+	ids, err := s.List(ctx, issuerPrefix)
+	if err != nil {
+		return "", nil, err
+	}
+	for _, id := range ids {
+		candidate, err := b.issuerByID(ctx, s, id)
+		if err != nil {
+			return "", nil, err
+		}
+		if candidate != nil && candidate.Name == ref {
+			return id, candidate, nil
+		}
+	}
+
+	return "", nil, fmt.Errorf("issuer %q does not exist in this mount; list them with LIST issuers", ref)
 }
 
 // putIssuer stores the issuer and makes it the one this mount signs with.
@@ -219,10 +270,13 @@ func (b *backend) role(ctx context.Context, s logical.Storage, name string) (*ro
 // cert/:serial answers for it and revoke/:serial can find its expiration. A
 // role that asks for no_store keeps the record but not the certificate, which
 // is what allows such a certificate to be revoked while leaving no copy of it
-// in the mount.
-func (b *backend) storeIssuedCertificate(ctx context.Context, s logical.Storage, cert *smx509.Certificate, roleName string, keep bool) error {
+// in the mount. The issuer is recorded with it, so a revocation later reaches
+// the list of the authority that signed it rather than whichever one is current
+// by then.
+func (b *backend) storeIssuedCertificate(ctx context.Context, s logical.Storage, cert *smx509.Certificate, roleName, issuerID string, keep bool) error {
 	entry := &certEntry{
 		Role:       roleName,
+		IssuerID:   issuerID,
 		Issued:     time.Now(),
 		Expiration: cert.NotAfter,
 	}
@@ -243,8 +297,23 @@ func (b *backend) revocationRecord(ctx context.Context, s logical.Storage, seria
 	return getJSON[revocationEntry](ctx, s, revokedPrefix+serial)
 }
 
-// currentCRL returns the cached CRL, or nil when none has been built yet.
-func (b *backend) currentCRL(ctx context.Context, s logical.Storage) (*crlEntry, error) {
+// currentCRL returns the cached CRL of one issuer, or nil when none has been
+// built yet.
+func (b *backend) currentCRL(ctx context.Context, s logical.Storage, issuerID string) (*crlEntry, error) {
+	entry, err := getJSON[crlEntry](ctx, s, crlPrefix+issuerID)
+	if err != nil || entry != nil {
+		return entry, err
+	}
+
+	// A mount written before each authority kept its own list holds a single CRL
+	// at crl/current. It belongs to the only issuer such a mount could have had;
+	// with more than one there is nothing to inherit, and serving it under the
+	// wrong authority would be worse than rebuilding the list.
+	issuers, err := s.List(ctx, issuerPrefix)
+	if err != nil || len(issuers) != 1 {
+		return nil, err
+	}
+
 	return getJSON[crlEntry](ctx, s, crlPrefix+"current")
 }
 
@@ -291,3 +360,7 @@ func (b *backend) deletePrefix(ctx context.Context, s logical.Storage, prefix st
 // errNoIssuer is the answer to every operation that needs a CA in a mount that
 // has none.
 var errNoIssuer = errors.New("no certificate authority is configured in this mount; call root/generate/:type or intermediate/generate/:type first")
+
+// issuerRefDefault is what a role or a path means when it names no issuer: the
+// one this mount signs with.
+const issuerRefDefault = "default"

@@ -22,9 +22,12 @@ path is free to choose and is `pki-gmsm` here, so it does not collide with the
 built-in `pki` engine, which usually already occupies `pki/`. Every path below
 is relative to the mount.
 
-A mount holds one authority and always signs with it. There is no `issuer_ref`
-to pick from, and generating a second authority over an existing one is refused:
-the certificates already issued would stop verifying against it.
+A mount holds one authority and signs with it unless a role names another one.
+`issuers` lists the authorities the mount holds and `issuer/:ref` reads one,
+addressed by identifier, by name or by the word `default`, answering with
+whether it is the one in use. Rotation is not implemented yet, so the mount can
+only hold the authority it was generated with, and generating a second one over
+it is refused: the certificates already issued would stop verifying against it.
 
 ## Contents
 
@@ -67,7 +70,9 @@ certificate needs to terminate a chain. `ca`, `ca/pem` (raw
 
 `DELETE pki-gmsm/root` removes the authority, its keys, every certificate it
 issued and the cached CRL. Roles survive, because they are policy rather than
-state of the authority.
+state of the authority. Each authority keeps its own CRL, so a revocation names
+the list of the authority that signed the certificate even after the mount has
+moved on.
 
 ## Roles
 
@@ -91,6 +96,7 @@ write and a patch. `roles` lists the names.
 | Subject | `organization`, `ou`, `country`, `locality`, `province`, `street_address`, `postal_code`, `serial_number` (the OID 2.5.4.5 value, not the certificate serial) |
 | Usage | `key_usage` (`DigitalSignature,KeyAgreement`), `ext_key_usage`, `ext_key_usage_oids`, `server_flag`, `client_flag`, `code_signing_flag`, `email_protection_flag` |
 | Storing | `no_store`, `generate_lease` |
+| Signing | `issuer_ref` (`default`), resolved to an identifier or a name when a certificate is issued |
 
 A name is accepted when it matches one of the three independent modes of
 `allowed_domains`: `allow_bare_domains` for the domain itself, `allow_subdomains`
@@ -238,7 +244,7 @@ remaining validity of the signing authority, with a warning.
 | Key algorithm | RSA, ECDSA, Ed25519 | SM2 only |
 | Certificate signature | SHA-2 family | `SM2WithSM3` only |
 | Subject key identifier | SHA-1 of the public key, RFC 5280 method 1 | SM3 of the public key, truncated to 160 bits |
-| Issuers | Many, addressed by name or identifier, with rotation and cross-signing | One per mount; it is replaced by deleting the authority |
+| Issuers | Many, addressed by name or identifier, with rotation and cross-signing | One per mount, addressed by identifier or name; rotation is not implemented, and the authority is replaced by deleting it |
 | Lease | Optional per-certificate lease | Not implemented; `generate_lease` only produces a warning |
 | `no_store` | The certificate is kept nowhere and cannot be revoked by serial | The metadata is kept, so the serial stays revocable |
 | Tidy | Asynchronous, with a status endpoint | Synchronous, and it answers with what it removed |

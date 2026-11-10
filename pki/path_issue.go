@@ -3,6 +3,7 @@ package pki
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -147,13 +148,13 @@ func (b *backend) pathIssueWrite(ctx context.Context, req *logical.Request, d *f
 		UnknownExtKeyUsage: unknownExtKeyUsage,
 		TTL:                ttl,
 		NotBefore:          role.NotBeforeDuration,
-	})
+	}, role.IssuerRef)
 	if err != nil {
 		return issuerError(err)
 	}
 	warnings = append(warnings, signWarnings...)
 
-	if err := b.storeIssuedCertificate(ctx, req.Storage, cert, roleName, !role.NoStore); err != nil {
+	if err := b.storeIssuedCertificate(ctx, req.Storage, cert, roleName, issuer.ID, !role.NoStore); err != nil {
 		return nil, err
 	}
 
@@ -271,13 +272,13 @@ func (b *backend) pathSignWrite(ctx context.Context, req *logical.Request, d *fr
 		UnknownExtKeyUsage: unknownExtKeyUsage,
 		TTL:                ttl,
 		NotBefore:          role.NotBeforeDuration,
-	})
+	}, role.IssuerRef)
 	if err != nil {
 		return issuerError(err)
 	}
 	warnings = append(warnings, signWarnings...)
 
-	if err := b.storeIssuedCertificate(ctx, req.Storage, cert, roleName, !role.NoStore); err != nil {
+	if err := b.storeIssuedCertificate(ctx, req.Storage, cert, roleName, issuer.ID, !role.NoStore); err != nil {
 		return nil, err
 	}
 
@@ -287,16 +288,16 @@ func (b *backend) pathSignWrite(ctx context.Context, req *logical.Request, d *fr
 	}, nil
 }
 
-// signForMount loads the authority, signs one certificate and returns it with
-// the issuer and the chain. It holds the lock for the whole step so a
-// concurrent delete cannot pull the key from under it.
-func (b *backend) signForMount(ctx context.Context, s logical.Storage, request certificateRequest) (*smx509.Certificate, *issuerEntry, []*smx509.Certificate, []string, error) {
+// signForMount loads the authority a role names, signs one certificate and
+// returns it with the issuer and the chain. It holds the lock for the whole step
+// so a concurrent delete cannot pull the key from under it.
+func (b *backend) signForMount(ctx context.Context, s logical.Storage, request certificateRequest, issuerRef string) (*smx509.Certificate, *issuerEntry, []*smx509.Certificate, []string, error) {
 	b.caMu.Lock()
 	defer b.caMu.Unlock()
 
-	issuer, err := b.issuer(ctx, s)
+	_, issuer, err := b.issuerByRef(ctx, s, issuerRef)
 	if err != nil {
-		return nil, nil, nil, nil, err
+		return nil, nil, nil, nil, &issuerLookupError{err: err}
 	}
 	if issuer == nil {
 		return nil, nil, nil, nil, errNoIssuer
@@ -320,10 +321,21 @@ func (b *backend) signForMount(ctx context.Context, s logical.Storage, request c
 	return cert, issuer, chain, warnings, nil
 }
 
+// issuerLookupError marks a ref that names no issuer as a mistake in the
+// request, which is what makes it a 400 rather than a 500.
+type issuerLookupError struct {
+	err error
+}
+
+func (e *issuerLookupError) Error() string { return e.err.Error() }
+
+func (e *issuerLookupError) Unwrap() error { return e.err }
+
 // issuerError turns a missing authority into the 400 every path answers with,
 // and leaves every other failure as it is.
 func issuerError(err error) (*logical.Response, error) {
-	if err == errNoIssuer {
+	var lookup *issuerLookupError
+	if err == errNoIssuer || errors.As(err, &lookup) {
 		return logical.ErrorResponse(err.Error()), logical.ErrInvalidRequest
 	}
 
@@ -344,6 +356,7 @@ func certificateResponseData(cert *smx509.Certificate, issuer *issuerEntry, chai
 		"ca_chain":      pemCertificates(der),
 		"serial_number": formatSerial(serialHex(cert.SerialNumber)),
 		"expiration":    cert.NotAfter.Unix(),
+		"issuer_id":     issuer.ID,
 	}
 }
 

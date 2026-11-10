@@ -66,6 +66,8 @@ func Backend(ctx context.Context, conf *logical.BackendConfig) (*backend, error)
 			b.pathCA(),
 			b.pathCAPEM(),
 			b.pathCAChain(),
+			b.pathIssuersList(),
+			b.pathIssuer(),
 			b.pathRoles(),
 			b.pathRolesList(),
 			b.pathIssue(),

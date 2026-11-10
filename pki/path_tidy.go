@@ -71,14 +71,17 @@ func (b *backend) pathTidyWrite(ctx context.Context, req *logical.Request, d *fr
 	}
 
 	if d.Get("tidy_revoked_certs").(bool) {
-		removed, err := b.deleteExpiredRevocations(ctx, req.Storage, cutoff)
+		removed, touched, err := b.deleteExpiredRevocations(ctx, req.Storage, cutoff)
 		if err != nil {
 			return nil, err
 		}
 		revocationsRemoved = removed
 
-		if removed > 0 {
-			if err := b.markCRLDirty(ctx, req.Storage); err != nil {
+		// Only the lists that lost an entry need rebuilding, which is why the
+		// scan reports the issuers it touched rather than waking every one of
+		// them up.
+		for issuerID := range touched {
+			if err := b.markCRLDirty(ctx, req.Storage, issuerID); err != nil {
 				return nil, err
 			}
 		}
@@ -117,30 +120,35 @@ func (b *backend) deleteExpiredCertificates(ctx context.Context, s logical.Stora
 
 // deleteExpiredRevocations drops a revocation once the certificate it names has
 // been expired for longer than the safety buffer. A revocation without an
-// expiration is kept: the certificate behind it may still be valid.
-func (b *backend) deleteExpiredRevocations(ctx context.Context, s logical.Storage, cutoff time.Time) (int, error) {
+// expiration is kept: the certificate behind it may still be valid. It answers
+// with the issuers whose lists lost an entry.
+func (b *backend) deleteExpiredRevocations(ctx context.Context, s logical.Storage, cutoff time.Time) (int, map[string]struct{}, error) {
 	serials, err := s.List(ctx, revokedPrefix)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 
 	removed := 0
+	touched := map[string]struct{}{}
 	for _, serial := range serials {
 		record, err := b.revocationRecord(ctx, s, serial)
 		if err != nil {
-			return removed, err
+			return removed, touched, err
 		}
 		if record == nil || record.Expiration == 0 || time.Unix(record.Expiration, 0).After(cutoff) {
 			continue
 		}
 
 		if err := s.Delete(ctx, revokedPrefix+serial); err != nil {
-			return removed, err
+			return removed, touched, err
 		}
 		removed++
+		if record.IssuerID != "" {
+			touched[record.IssuerID] = struct{}{}
+		}
 	}
 
-	return removed, nil
+	return removed, touched, nil
 }
 
 const pathTidyHelpSyn = `Remove the state of certificates that expired long ago`

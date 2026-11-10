@@ -335,7 +335,7 @@ func (b *backend) pathRootSignIntermediateWrite(ctx context.Context, req *logica
 		return nil, err
 	}
 
-	if err := b.storeIssuedCertificate(ctx, req.Storage, cert, "intermediate", true); err != nil {
+	if err := b.storeIssuedCertificate(ctx, req.Storage, cert, "intermediate", issuer.ID, true); err != nil {
 		return nil, err
 	}
 
@@ -351,6 +351,7 @@ func (b *backend) pathRootSignIntermediateWrite(ctx context.Context, req *logica
 			"ca_chain":      pemCertificates(der),
 			"serial_number": formatSerial(serialHex(cert.SerialNumber)),
 			"expiration":    cert.NotAfter.Unix(),
+			"issuer_id":     issuer.ID,
 		},
 		Warnings: warnings,
 	}, nil

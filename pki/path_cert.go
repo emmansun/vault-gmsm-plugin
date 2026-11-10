@@ -58,6 +58,9 @@ func (b *backend) pathCertRead(ctx context.Context, req *logical.Request, d *fra
 		"issued":        record.Issued.Unix(),
 		"expiration":    record.Expiration.Unix(),
 	}
+	if record.IssuerID != "" {
+		data["issuer_id"] = record.IssuerID
+	}
 	if len(record.Certificate) > 0 {
 		data["certificate"] = pemCertificate(record.Certificate)
 	}

@@ -146,7 +146,7 @@ func (b *backend) pathCRLRotateWrite(ctx context.Context, req *logical.Request, 
 		return logical.ErrorResponse(errNoIssuer.Error()), logical.ErrInvalidRequest
 	}
 
-	previous, err := b.currentCRL(ctx, req.Storage)
+	previous, err := b.currentCRL(ctx, req.Storage, issuer.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -177,7 +177,7 @@ func (b *backend) crlForRead(ctx context.Context, s logical.Storage) (*crlEntry,
 		return nil, logical.ErrorResponse(errNoIssuer.Error()), logical.ErrInvalidRequest
 	}
 
-	cached, err := b.currentCRL(ctx, s)
+	cached, err := b.currentCRL(ctx, s, issuer.ID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -193,22 +193,27 @@ func (b *backend) crlForRead(ctx context.Context, s logical.Storage) (*crlEntry,
 	return entry, nil, nil
 }
 
-// markCRLDirty records that a revocation arrived after the cached list was
-// signed. The list itself is rebuilt on the next read, so a revoke does not pay
-// for signing it.
-func (b *backend) markCRLDirty(ctx context.Context, s logical.Storage) error {
-	entry, err := b.currentCRL(ctx, s)
+// markCRLDirty records that a revocation arrived after the cached list of this
+// issuer was signed. The list itself is rebuilt on the next read, so a revoke
+// does not pay for signing it.
+func (b *backend) markCRLDirty(ctx context.Context, s logical.Storage, issuerID string) error {
+	entry, err := b.currentCRL(ctx, s, issuerID)
 	if err != nil || entry == nil || entry.Dirty {
 		return err
 	}
 
 	entry.Dirty = true
-	return putJSON(ctx, s, crlPrefix+"current", entry)
+	return putJSON(ctx, s, crlPrefix+issuerID, entry)
 }
 
-// buildCRL signs a new list from every revocation record and caches it. The
-// number only ever grows, so a client can tell two lists apart.
+// buildCRL signs a new list from every revocation of this issuer and caches it.
+// The number only ever grows, so a client can tell two lists apart; each issuer
+// counts on its own, which keeps the numbering of one from moving the other.
 func (b *backend) buildCRL(ctx context.Context, s logical.Storage, issuer *issuerEntry, previous *crlEntry) (*crlEntry, error) {
+	if issuer.ID == "" {
+		return nil, fmt.Errorf("the issuer record has no identifier")
+	}
+
 	number := 1
 	if previous != nil && previous.Number != "" {
 		parsed, err := strconv.Atoi(previous.Number)
@@ -218,7 +223,7 @@ func (b *backend) buildCRL(ctx context.Context, s logical.Storage, issuer *issue
 		number = parsed + 1
 	}
 
-	entries, err := b.crlEntries(ctx, s)
+	entries, err := b.crlEntries(ctx, s, issuer.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -252,15 +257,17 @@ func (b *backend) buildCRL(ctx context.Context, s logical.Storage, issuer *issue
 		NextUpdate: template.NextUpdate,
 		DER:        der,
 	}
-	if err := putJSON(ctx, s, crlPrefix+"current", entry); err != nil {
+	if err := putJSON(ctx, s, crlPrefix+issuer.ID, entry); err != nil {
 		return nil, err
 	}
 
 	return entry, nil
 }
 
-// crlEntries turns every revocation record into an entry of the list.
-func (b *backend) crlEntries(ctx context.Context, s logical.Storage) ([]smx509.RevocationListEntry, error) {
+// crlEntries turns the revocation records of one issuer into entries of its
+// list. A revocation belongs to the authority that signed the certificate, so a
+// merged list would name serials its own signature says nothing about.
+func (b *backend) crlEntries(ctx context.Context, s logical.Storage, issuerID string) ([]smx509.RevocationListEntry, error) {
 	names, err := s.List(ctx, revokedPrefix)
 	if err != nil {
 		return nil, err
@@ -272,7 +279,7 @@ func (b *backend) crlEntries(ctx context.Context, s logical.Storage) ([]smx509.R
 		if err != nil {
 			return nil, err
 		}
-		if record == nil {
+		if record == nil || record.IssuerID != issuerID {
 			continue
 		}
 

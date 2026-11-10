@@ -52,20 +52,27 @@ func (b *backend) pathRevokeWrite(ctx context.Context, req *logical.Request, d *
 	b.caMu.Lock()
 	defer b.caMu.Unlock()
 
-	issuerID, err := b.issuerID(ctx, req.Storage)
-	if err != nil {
-		return nil, err
-	}
-	if issuerID == "" {
-		return logical.ErrorResponse(errNoIssuer.Error()), logical.ErrInvalidRequest
-	}
-
 	record, err := b.certificateRecord(ctx, req.Storage, serial)
 	if err != nil {
 		return nil, err
 	}
 	if record == nil {
 		return logical.ErrorResponse(fmt.Sprintf("serial number %s has not been issued by this mount", formatSerial(serial))), logical.ErrInvalidRequest
+	}
+
+	// The revocation belongs to the authority that signed the certificate, so it
+	// reaches that authority's list even after the mount has moved on. A record
+	// written before certificates named their issuer belongs to the one the mount
+	// signs with.
+	issuerID := record.IssuerID
+	if issuerID == "" {
+		issuerID, err = b.issuerID(ctx, req.Storage)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if issuerID == "" {
+		return logical.ErrorResponse(errNoIssuer.Error()), logical.ErrInvalidRequest
 	}
 
 	existing, err := b.revocationRecord(ctx, req.Storage, serial)
@@ -97,7 +104,7 @@ func (b *backend) pathRevokeWrite(ctx context.Context, req *logical.Request, d *
 	if err := putJSON(ctx, req.Storage, revokedPrefix+serial, revocation); err != nil {
 		return nil, err
 	}
-	if err := b.markCRLDirty(ctx, req.Storage); err != nil {
+	if err := b.markCRLDirty(ctx, req.Storage, issuerID); err != nil {
 		return nil, err
 	}
 
