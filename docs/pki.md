@@ -22,18 +22,22 @@ path is free to choose and is `pki-gmsm` here, so it does not collide with the
 built-in `pki` engine, which usually already occupies `pki/`. Every path below
 is relative to the mount.
 
-A mount holds one authority and signs with it unless a role names another one.
-`issuers` lists the authorities the mount holds and `issuer/:ref` reads one,
-addressed by identifier, by name or by the word `default`, answering with
-whether it is the one in use. Rotation is not implemented yet, so the mount can
-only hold the authority it was generated with, and generating a second one over
-it is refused: the certificates already issued would stop verifying against it.
+A mount holds the authorities it was given, and signs with one of them: the
+first it generated or imported, or the one selected with `issuer/:ref/default`.
+`issuers` lists them and `issuer/:ref` reads one, addressed by identifier, by
+name or by the word `default`, answering with whether it is the one in use.
+`root/rotate/:type` generates a new authority beside the old one and signs with
+it from then on; the old one stays, so the certificates it signed keep verifying
+and its list keeps reporting its revocations. `DELETE /issuer/:ref` retires one,
+but only once its certificates have expired. `config/ca` adopts an authority
+that was created elsewhere.
 
 ## Contents
 
 - [Certificate authority plugin (`pki-gmsm`)](#certificate-authority-plugin-pki-gmsm)
   - [Contents](#contents)
   - [Generating the authority](#generating-the-authority)
+  - [Rotating, retiring and importing one](#rotating-retiring-and-importing-one)
   - [Roles](#roles)
     - [Role names and storage](#role-names-and-storage)
     - [A certificate for signing only](#a-certificate-for-signing-only)
@@ -72,7 +76,54 @@ certificate needs to terminate a chain. `ca`, `ca/pem` (raw
 issued and the cached CRL. Roles survive, because they are policy rather than
 state of the authority. Each authority keeps its own CRL, so a revocation names
 the list of the authority that signed the certificate even after the mount has
-moved on.
+moved on. A mount that has been rotated holds more than one authority, and this
+delete is refused there: retire them one at a time, as described below.
+
+## Rotating, retiring and importing one
+
+A rotation adds an authority and leaves the one it replaces in place:
+
+```console
+$ vault write pki-gmsm/root/rotate/internal common_name="Example Root CA 2026"
+Key                 Value
+---                 -----
+certificate         -----BEGIN CERTIFICATE-----…
+issuer_id           4b1d…
+previous_issuer_id  c8f1…
+```
+
+The mount signs with the new authority from then on. The old one answers on
+`issuer/:ref` and still signs for a role whose `issuer_ref` names it, which is
+what lets the certificates issued under it keep their own authority for as long
+as they are valid. `issuer/:ref/default` moves the mount back to one of them:
+
+```console
+$ vault write -f pki-gmsm/issuer/c8f1…/default
+```
+
+| Path | Purpose |
+| --- | --- |
+| `root/rotate/:type` | generates a new self-signed authority and signs with it |
+| `issuer/:ref/default` | makes one of the authorities the one in use |
+| `DELETE issuer/:ref` | retires one authority, once its certificates have expired |
+| `config/ca` | adopts a private key, its certificate and the chain above it |
+
+Retiring an authority removes its key, its cached list, the revocations it
+recorded and the certificates it issued; the mount signs with another one
+afterwards. It is refused while a certificate of that authority has not expired,
+because the list that would have reported its revocation goes with it.
+`DELETE /root` still removes everything, and it refuses a mount that has been
+rotated: retire the authorities one at a time until one is left.
+
+`config/ca` is the way in for an authority created elsewhere, offline or by
+another tool. The bundle carries the private key, the certificate that belongs
+to it and the certificates above it. The certificate has to carry the public key
+of the key and be a CA, and the chain has to sign in order; anything else is
+refused before it is stored.
+
+```console
+$ vault write pki-gmsm/config/ca pem_bundle=@authority.pem
+```
 
 ## Roles
 
@@ -244,7 +295,8 @@ remaining validity of the signing authority, with a warning.
 | Key algorithm | RSA, ECDSA, Ed25519 | SM2 only |
 | Certificate signature | SHA-2 family | `SM2WithSM3` only |
 | Subject key identifier | SHA-1 of the public key, RFC 5280 method 1 | SM3 of the public key, truncated to 160 bits |
-| Issuers | Many, addressed by name or identifier, with rotation and cross-signing | One per mount, addressed by identifier or name; rotation is not implemented, and the authority is replaced by deleting it |
+| Issuers | Many, addressed by name or identifier, with rotation and cross-signing | Many, addressed by identifier or name, with rotation; no cross-signing |
+| Importing an authority | `config/ca`, `issuers/import/bundle` | `config/ca`, as the first authority of a mount |
 | Lease | Optional per-certificate lease | Not implemented; `generate_lease` only produces a warning |
 | `no_store` | The certificate is kept nowhere and cannot be revoked by serial | The metadata is kept, so the serial stays revocable |
 | Tidy | Asynchronous, with a status endpoint | Synchronous, and it answers with what it removed |

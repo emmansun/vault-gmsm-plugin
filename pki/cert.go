@@ -228,6 +228,108 @@ func parseCertificateRequest(raw string) (*smx509.CertificateRequest, error) {
 	return csr, nil
 }
 
+// parseAuthorityBundle reads a private key and its certificate from one PEM
+// bundle, which is how an authority created elsewhere is adopted. The
+// certificate has to carry the public key of the key in the bundle, and the
+// chain has to sign in order: a mount that stores a mismatched pair can only
+// fail later, when a certificate is requested.
+func parseAuthorityBundle(pemText string) (*sm2.PrivateKey, []*smx509.Certificate, error) {
+	var (
+		key   *sm2.PrivateKey
+		certs []*smx509.Certificate
+	)
+
+	remaining := []byte(strings.TrimSpace(pemText))
+	if len(remaining) == 0 {
+		return nil, nil, errors.New("pem_bundle is required")
+	}
+
+	for len(remaining) > 0 {
+		var block *pem.Block
+		block, remaining = pem.Decode(remaining)
+		if block == nil {
+			return nil, nil, errors.New("could not decode a PEM block in the bundle")
+		}
+
+		switch block.Type {
+		case "CERTIFICATE":
+			cert, err := smx509.ParseCertificate(block.Bytes)
+			if err != nil {
+				return nil, nil, fmt.Errorf("could not parse a certificate of the bundle: %w", err)
+			}
+			certs = append(certs, cert)
+		case "EC PRIVATE KEY", "PRIVATE KEY":
+			if key != nil {
+				return nil, nil, errors.New("the bundle carries more than one private key")
+			}
+
+			parsed, err := parsePrivateKeyBlock(block)
+			if err != nil {
+				return nil, nil, err
+			}
+			key = parsed
+		default:
+			return nil, nil, fmt.Errorf("the bundle carries a %s block, which is neither a private key nor a certificate", block.Type)
+		}
+	}
+
+	if key == nil {
+		return nil, nil, errors.New("the bundle carries no private key")
+	}
+	if len(certs) == 0 {
+		return nil, nil, errors.New("the bundle carries no certificate")
+	}
+
+	leaf := certs[0]
+	publicKey, err := checkSM2PublicKey(leaf.PublicKey)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !publicKey.Equal(&key.PublicKey) {
+		return nil, nil, errors.New("the certificate does not carry the public key of the private key in the bundle")
+	}
+	if !leaf.IsCA {
+		return nil, nil, errors.New("the certificate is not a certificate authority")
+	}
+
+	for i := 0; i+1 < len(certs); i++ {
+		if err := certs[i].CheckSignatureFrom(certs[i+1]); err != nil {
+			return nil, nil, fmt.Errorf("certificate %d of the bundle is not signed by the one above it: %w", i+1, err)
+		}
+	}
+
+	return key, certs, nil
+}
+
+// parsePrivateKeyBlock reads an unencrypted key and refuses anything the mount
+// cannot sign with.
+func parsePrivateKeyBlock(block *pem.Block) (*sm2.PrivateKey, error) {
+	if block.Type == "PRIVATE KEY" {
+		parsed, err := smx509.ParsePKCS8PrivateKey(block.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("could not parse the private key of the bundle: %w", err)
+		}
+
+		key, ok := parsed.(*sm2.PrivateKey)
+		if !ok {
+			return nil, fmt.Errorf("the private key in the bundle is a %T, not an SM2 key", parsed)
+		}
+		return key, nil
+	}
+
+	parsed, err := smx509.ParseTypedECPrivateKey(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("could not parse the private key of the bundle: %w", err)
+	}
+
+	key, ok := parsed.(*sm2.PrivateKey)
+	if !ok {
+		return nil, fmt.Errorf("the private key in the bundle is a %T, not an SM2 key", parsed)
+	}
+
+	return key, nil
+}
+
 // marshalPrivateKey renders a private key for the response. The default form is
 // SEC 1, which is what the export path of the gmsm backend produces; callers
 // that need PKCS#8 ask for it with private_key_format.

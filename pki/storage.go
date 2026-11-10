@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -220,7 +221,36 @@ func (b *backend) putIssuer(ctx context.Context, s logical.Storage, id string, i
 		return err
 	}
 
+	return b.setIssuerDefault(ctx, s, id)
+}
+
+// setIssuerDefault points the mount at one of the authorities it holds.
+func (b *backend) setIssuerDefault(ctx context.Context, s logical.Storage, id string) error {
 	return putJSON(ctx, s, configIssuerPath, &issuerIndex{ID: id})
+}
+
+// issuers reads every authority the mount holds. The identifiers are sorted so
+// that a decision taken over the whole set, such as which one takes over when
+// the current one is retired, does not depend on the order storage answers in.
+func (b *backend) issuers(ctx context.Context, s logical.Storage) ([]*issuerEntry, error) {
+	ids, err := s.List(ctx, issuerPrefix)
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(ids)
+
+	entries := make([]*issuerEntry, 0, len(ids))
+	for _, id := range ids {
+		issuer, err := b.issuerByID(ctx, s, id)
+		if err != nil {
+			return nil, err
+		}
+		if issuer != nil {
+			entries = append(entries, issuer)
+		}
+	}
+
+	return entries, nil
 }
 
 // issuerSigner loads the private key of an issuer and refuses to go on when it
@@ -295,6 +325,140 @@ func (b *backend) certificateRecord(ctx context.Context, s logical.Storage, seri
 
 func (b *backend) revocationRecord(ctx context.Context, s logical.Storage, serial string) (*revocationEntry, error) {
 	return getJSON[revocationEntry](ctx, s, revokedPrefix+serial)
+}
+
+// belongsToIssuer says whether a record that names an issuer was signed by the
+// authority in question. A record written before the mount recorded the issuer
+// with every certificate belongs to the authority the mount signed with at the
+// time, which is the default one.
+func belongsToIssuer(recordIssuer, issuerID, defaultID string) bool {
+	return recordIssuer == issuerID || (recordIssuer == "" && issuerID == defaultID)
+}
+
+// liveCertificates counts the certificates of one issuer that a client can
+// still present, and reports the one that expires last. A certificate revoked
+// early counts as well: what makes it harmless is its expiration, and retiring
+// the authority takes the list that would have said it was revoked with it.
+func (b *backend) liveCertificates(ctx context.Context, s logical.Storage, issuerID string) (int, time.Time, error) {
+	defaultID, err := b.issuerID(ctx, s)
+	if err != nil {
+		return 0, time.Time{}, err
+	}
+
+	names, err := s.List(ctx, certPrefix)
+	if err != nil {
+		return 0, time.Time{}, err
+	}
+
+	now := time.Now()
+	count := 0
+	var latest time.Time
+	for _, name := range names {
+		record, err := b.certificateRecord(ctx, s, name)
+		if err != nil {
+			return 0, time.Time{}, err
+		}
+		if record == nil || !belongsToIssuer(record.IssuerID, issuerID, defaultID) {
+			continue
+		}
+		if !record.Expiration.After(now) {
+			continue
+		}
+
+		count++
+		if record.Expiration.After(latest) {
+			latest = record.Expiration
+		}
+	}
+
+	return count, latest, nil
+}
+
+// retireIssuer removes one authority and the state only it can speak for: its
+// key, its cached list, the revocations it recorded and the certificates it
+// issued. What belongs to the other authorities is left alone. The mount signs
+// with another authority afterwards, or with none when this was the last one.
+func (b *backend) retireIssuer(ctx context.Context, s logical.Storage, issuer *issuerEntry) (int, int, error) {
+	defaultID, err := b.issuerID(ctx, s)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	certificates := 0
+	names, err := s.List(ctx, certPrefix)
+	if err != nil {
+		return 0, 0, err
+	}
+	for _, name := range names {
+		record, err := b.certificateRecord(ctx, s, name)
+		if err != nil {
+			return 0, 0, err
+		}
+		if record == nil || !belongsToIssuer(record.IssuerID, issuer.ID, defaultID) {
+			continue
+		}
+		if err := s.Delete(ctx, certPrefix+name); err != nil {
+			return certificates, 0, err
+		}
+		certificates++
+	}
+
+	revocations := 0
+	names, err = s.List(ctx, revokedPrefix)
+	if err != nil {
+		return certificates, 0, err
+	}
+	for _, name := range names {
+		record, err := b.revocationRecord(ctx, s, name)
+		if err != nil {
+			return certificates, revocations, err
+		}
+		if record == nil || !belongsToIssuer(record.IssuerID, issuer.ID, defaultID) {
+			continue
+		}
+		if err := s.Delete(ctx, revokedPrefix+name); err != nil {
+			return certificates, revocations, err
+		}
+		revocations++
+	}
+
+	paths := []string{crlPrefix + issuer.ID, issuerPrefix + issuer.ID}
+	if issuer.KeyID != "" {
+		paths = append(paths, keyPrefix+issuer.KeyID)
+	}
+	for _, path := range paths {
+		if err := s.Delete(ctx, path); err != nil {
+			return certificates, revocations, err
+		}
+	}
+
+	return certificates, revocations, b.chooseDefaultIssuer(ctx, s, issuer.ID, defaultID)
+}
+
+// chooseDefaultIssuer points the mount at an authority that is still there
+// after the one it signed with was retired. A mount left without any authority
+// forgets the pointer as well, and takes the single list a mount written before
+// rotation kept with it, because nothing will serve that list again.
+func (b *backend) chooseDefaultIssuer(ctx context.Context, s logical.Storage, retiredID, defaultID string) error {
+	remaining, err := b.issuers(ctx, s)
+	if err != nil {
+		return err
+	}
+
+	if len(remaining) == 0 {
+		for _, path := range []string{configIssuerPath, crlPrefix + "current"} {
+			if err := s.Delete(ctx, path); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	if retiredID != defaultID {
+		return nil
+	}
+
+	return b.setIssuerDefault(ctx, s, remaining[0].ID)
 }
 
 // currentCRL returns the cached CRL of one issuer, or nil when none has been

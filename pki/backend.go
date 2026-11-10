@@ -25,8 +25,8 @@ const (
 const backendHelp = `
 The pki-gmsm backend issues SM2 certificates from a certificate authority it
 holds in the mount. The authority is either generated here as a self-signed
-root or completed from a certificate signed elsewhere, and it is the only one
-the mount holds.
+root, adopted from a bundle, or completed from a certificate signed elsewhere;
+a mount can hold several of them, and root/rotate adds one beside the others.
 `
 
 // Factory is the entry point Vault calls to create the backend.
@@ -59,6 +59,7 @@ func Backend(ctx context.Context, conf *logical.BackendConfig) (*backend, error)
 			// Fixed paths are registered before the patterns they extend, and
 			// every one of them ends in "$" so that "ca" cannot capture "ca/pem".
 			b.pathRootGenerate(),
+			b.pathRootRotate(),
 			b.pathRootSignIntermediate(),
 			b.pathRootDelete(),
 			b.pathIntermediateGenerate(),
@@ -67,6 +68,7 @@ func Backend(ctx context.Context, conf *logical.BackendConfig) (*backend, error)
 			b.pathCAPEM(),
 			b.pathCAChain(),
 			b.pathIssuersList(),
+			b.pathIssuerDefault(),
 			b.pathIssuer(),
 			b.pathRoles(),
 			b.pathRolesList(),
@@ -79,6 +81,7 @@ func Backend(ctx context.Context, conf *logical.BackendConfig) (*backend, error)
 			b.pathCRLPEM(),
 			b.pathCRLDER(),
 			b.pathCRLRotate(),
+			b.pathConfigCA(),
 			b.pathConfigURLs(),
 			b.pathTidy(),
 		},

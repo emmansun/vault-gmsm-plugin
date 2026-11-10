@@ -524,6 +524,42 @@ jobs:
         expect "tidy keeps a live certificate" "$leaf_serial" \
           "$(vault read -field=serial_number "$PKI_MOUNT/cert/$leaf_serial")"
 
+        # A rotation adds an authority and leaves the one that signed the leaf
+        # where it is. That one cannot go while the certificate is still valid,
+        # because its list would go with it.
+        vault write -format=json "$PKI_MOUNT/root/rotate/internal" \
+          common_name="Rotated Root CA" ttl=720h > "$RUNNER_TEMP/rotated.json"
+        rotated_id=$(jq -r '.data.issuer_id // empty' "$RUNNER_TEMP/rotated.json")
+        [ -n "$rotated_id" ] || fail "root/rotate returned no issuer: $(cat "$RUNNER_TEMP/rotated.json")"
+        previous_id=$(jq -r '.data.previous_issuer_id // empty' "$RUNNER_TEMP/rotated.json")
+        [ -n "$previous_id" ] || fail "root/rotate did not name the authority it replaced"
+
+        expect "the mount lists both authorities" 2 \
+          "$(vault list -format=json "$PKI_MOUNT/issuers" | jq 'length')"
+        expect "the mount signs with the new authority" "$rotated_id" \
+          "$(vault read -field=issuer_id "$PKI_MOUNT/ca")"
+
+        if out=$(vault delete "$PKI_MOUNT/issuer/$previous_id" 2>&1); then
+          fail "an authority with a live certificate was retired"
+        fi
+        case $out in
+          *"has not expired"*) ;;
+          *) fail "the retirement was refused as: $out" ;;
+        esac
+
+        if out=$(vault delete "$PKI_MOUNT/root" 2>&1); then
+          fail "the mount was emptied although it holds two authorities"
+        fi
+        case $out in
+          *"retire them one at a time"*) ;;
+          *) fail "the bulk delete was refused as: $out" ;;
+        esac
+
+        # The switch takes no parameters, so it has to be forced as well.
+        vault write -f "$PKI_MOUNT/issuer/$previous_id/default" > /dev/null
+        expect "the mount signs with the authority it was given" "$previous_id" \
+          "$(vault read -field=issuer_id "$PKI_MOUNT/ca")"
+
     - name: Dump Vault server log
       if: always()
       run: |
