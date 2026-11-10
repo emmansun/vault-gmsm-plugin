@@ -38,4 +38,39 @@ jobs:
         goversion: "1.27"
         sha256sum: true
         md5sum: false
-        
+
+  # The pki plugin is a second plugin with its own binary, so it is built and
+  # published next to the transit one, in the same release and therefore under
+  # the same version. Vault looks for a file named exactly after the registered
+  # plugin name, so the binary is pki-gmsm; the asset name is left at the
+  # action's default (pki-gmsm-vX.Y.Z-linux-amd64.tar.gz), which is the form the
+  # transit assets already use.
+  releases-pki-matrix:
+    name: Release PKI Plugin Binary
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        goos: [linux, windows, darwin]
+        goarch: [amd64, arm64]
+        exclude:
+          - goarch: arm64
+            goos: windows
+        include:
+          - goos: linux
+            goarch: riscv64
+          - goos: linux
+            goarch: loong64
+    steps:
+    - uses: actions/checkout@v7
+    - uses: wangyoucao577/go-release-action@v1.55
+      env:
+        CGO_ENABLED: 0
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        goos: ${{ matrix.goos }}
+        goarch: ${{ matrix.goarch }}
+        goversion: "1.27"
+        project_path: "./cmd/pki-gmsm"
+        binary_name: "pki-gmsm"
+        sha256sum: true
+        md5sum: false

@@ -336,3 +336,180 @@ jobs:
       run: |
         cat "$RUNNER_TEMP/vault.log" || true
         pkill -f "vault server -dev" || true
+
+  # The pki plugin is a second plugin with a mount type of its own, so it gets a
+  # dev server of its own as well. The unit tests already sign and verify in
+  # process; what this job adds is the plugin RPC hop, the HTTP shapes of the raw
+  # certificate and CRL answers, and the storage of a real Vault server.
+  integration-pki:
+    name: PKI Integration Test
+    runs-on: ubuntu-latest
+    needs: build
+    env:
+      VAULT_VERSION: "2.1.1"
+      VAULT_ADDR: http://127.0.0.1:8200
+      VAULT_TOKEN: root
+      PKI_MOUNT: pki-gmsm
+    steps:
+    - name: Checkout Repo
+      uses: actions/checkout@v7
+
+    - name: Set up Go
+      uses: actions/setup-go@v7
+      with:
+        go-version: '1.27'
+
+    - name: Build plugin
+      run: |
+        set -euo pipefail
+        mkdir -p "$RUNNER_TEMP/plugin-build" "$RUNNER_TEMP/plugins"
+        CGO_ENABLED=0 go build -trimpath \
+          -o "$RUNNER_TEMP/plugin-build/pki-gmsm" ./cmd/pki-gmsm
+
+    - name: Install Vault
+      run: |
+        set -euo pipefail
+        curl -fsSL -o "$RUNNER_TEMP/vault.zip" \
+          "https://releases.hashicorp.com/vault/${VAULT_VERSION}/vault_${VAULT_VERSION}_linux_amd64.zip"
+        unzip -q -o "$RUNNER_TEMP/vault.zip" -d "$RUNNER_TEMP/vault-bin"
+        echo "$RUNNER_TEMP/vault-bin" >> "$GITHUB_PATH"
+        "$RUNNER_TEMP/vault-bin/vault" version
+
+    - name: Start Vault dev server
+      run: |
+        set -euo pipefail
+        # Vault 2.x dev mode probes every binary in -dev-plugin-dir at startup and
+        # aborts when one is not a database plugin, so the directory has to stay
+        # empty here; the plugin binary is copied in once the server is up.
+        nohup vault server -dev -dev-root-token-id=root \
+          -dev-plugin-dir="$RUNNER_TEMP/plugins" -log-level=info > "$RUNNER_TEMP/vault.log" 2>&1 &
+        for _ in $(seq 1 30); do
+          if curl -fsS "$VAULT_ADDR/v1/sys/health" > /dev/null; then
+            exit 0
+          fi
+          sleep 1
+        done
+        echo '::error::vault dev server did not become ready'
+        cat "$RUNNER_TEMP/vault.log"
+        exit 1
+
+    - name: Run PKI walkthrough
+      run: |
+        set -euo pipefail
+
+        trap 'echo "::error::failed: ${BASH_COMMAND:0:200}"' ERR
+
+        fail() {
+          echo "::error::$1"
+          exit 1
+        }
+
+        expect() {
+          [ "${3-}" = "$2" ] || fail "$1: got '${3-}', want '$2'"
+        }
+
+        # Vault looks for a file named exactly after the registered plugin name,
+        # so the binary is copied in as pki-gmsm and registered as pki-gmsm.
+        plugin_bin="$RUNNER_TEMP/plugins/pki-gmsm"
+        cp "$RUNNER_TEMP/plugin-build/pki-gmsm" "$plugin_bin"
+        chmod 0755 "$plugin_bin"
+        vault plugin register -sha256="$(sha256sum "$plugin_bin" | cut -d' ' -f1)" secret pki-gmsm
+        vault secrets enable -path="$PKI_MOUNT" pki-gmsm
+
+        # A mount without an authority refuses to issue, and says what to do.
+        if out=$(vault write "$PKI_MOUNT/issue/web" common_name=web.example.com 2>&1); then
+          fail "a mount without an authority issued a certificate"
+        fi
+        case $out in
+          *"no certificate authority is configured"*) ;;
+          *) fail "the missing authority was reported as: $out" ;;
+        esac
+
+        # The authority is generated once, and an internal one keeps its key.
+        vault write "$PKI_MOUNT/root/generate/internal" \
+          common_name="Test Root CA" organization=Acme ttl=8760h > "$RUNNER_TEMP/root.json"
+        root_serial=$(jq -r '.data.serial_number // empty' "$RUNNER_TEMP/root.json")
+        [ -n "$root_serial" ] || fail "root/generate returned no serial: $(cat "$RUNNER_TEMP/root.json")"
+        [ -z "$(jq -r '.data.private_key // empty' "$RUNNER_TEMP/root.json")" ] \
+          || fail "an internal authority returned its private key"
+        vault read "$PKI_MOUNT/ca" > /dev/null
+        curl -fsS -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/$PKI_MOUNT/ca/pem" \
+          | grep -q 'BEGIN CERTIFICATE' || fail "ca/pem is not a PEM certificate"
+
+        if second=$(vault write "$PKI_MOUNT/root/generate/internal" common_name="Second Root" 2>&1); then
+          fail "a second authority was generated in the same mount"
+        fi
+        case $second in
+          *"already holds a certificate authority"*) ;;
+          *) fail "the second authority was refused as: $second" ;;
+        esac
+
+        vault write "$PKI_MOUNT/roles/web" allowed_domains=example.com allow_subdomains=true \
+          ttl=24h max_ttl=720h > /dev/null
+
+        # The role decides what may be issued; the refusal names the policy.
+        if out=$(vault write "$PKI_MOUNT/issue/web" common_name=web.other.com 2>&1); then
+          fail "a name outside the role was issued"
+        fi
+        case $out in
+          *"is not allowed by this role"*) ;;
+          *) fail "the refused name was reported as: $out" ;;
+        esac
+
+        vault write -format=json "$PKI_MOUNT/issue/web" \
+          common_name=web.example.com alt_names=api.example.com ip_sans=10.0.0.1 \
+          > "$RUNNER_TEMP/leaf.json"
+        leaf_serial=$(jq -r '.data.serial_number // empty' "$RUNNER_TEMP/leaf.json")
+        [ -n "$leaf_serial" ] || fail "issue returned no serial: $(cat "$RUNNER_TEMP/leaf.json")"
+        jq -r '.data.certificate' "$RUNNER_TEMP/leaf.json" > "$RUNNER_TEMP/leaf.pem"
+        jq -r '.data.issuing_ca' "$RUNNER_TEMP/leaf.json" > "$RUNNER_TEMP/ca.pem"
+        jq -r '.data.private_key' "$RUNNER_TEMP/leaf.json" \
+          | grep -q 'BEGIN EC PRIVATE KEY' || fail "issue returned no SEC 1 private key"
+
+        # Neither the CLI nor the certificate tooling of a runner parses an SM2
+        # signed certificate, so the signature is checked in this module.
+        go run ./scripts/ci/pkicheck -cert "$RUNNER_TEMP/leaf.pem" -ca "$RUNNER_TEMP/ca.pem" \
+          || fail "the issued certificate does not verify against its authority"
+
+        expect "cert/:serial reports the serial" "$leaf_serial" \
+          "$(vault read -field=serial_number "$PKI_MOUNT/cert/$leaf_serial")"
+        expect "the listing holds the serial" "$leaf_serial" \
+          "$(vault list -format=json "$PKI_MOUNT/certs" | jq -r '.[0]')"
+
+        # Revocation is recorded on the certificate and reaches the CRL.
+        vault write "$PKI_MOUNT/revoke" serial_number="$leaf_serial" > /dev/null
+        revoked=$(vault read -field=revocation_time "$PKI_MOUNT/cert/$leaf_serial")
+        [ "${revoked:-0}" -gt 0 ] || fail "the revoked certificate reports revocation_time '$revoked'"
+
+        crl_number=$(vault read -field=number "$PKI_MOUNT/crl")
+        curl -fsS -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/$PKI_MOUNT/crl/pem" \
+          | grep -q 'BEGIN X509 CRL' || fail "crl/pem is not a PEM certificate revocation list"
+        der_type=$(curl -fsS -o "$RUNNER_TEMP/crl.der" -w '%{content_type}' \
+          -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/$PKI_MOUNT/crl/der")
+        case $der_type in
+          application/pkix-crl*) ;;
+          *) fail "crl/der answered with content type '$der_type'" ;;
+        esac
+
+        vault write "$PKI_MOUNT/crl/rotate" > /dev/null
+        expect "rotating the CRL increments its number" "$((crl_number + 1))" \
+          "$(vault read -field=number "$PKI_MOUNT/crl")"
+
+        # The distribution point the certificates will name is stored and read back.
+        vault write "$PKI_MOUNT/config/urls" \
+          issuing_certificates="$VAULT_ADDR/v1/$PKI_MOUNT/ca" \
+          crl_distribution_points="$VAULT_ADDR/v1/$PKI_MOUNT/crl" > /dev/null
+        vault read -format=json "$PKI_MOUNT/config/urls" > "$RUNNER_TEMP/urls.json"
+        grep -qF "$VAULT_ADDR/v1/$PKI_MOUNT/crl" "$RUNNER_TEMP/urls.json" \
+          || fail "config/urls did not keep the distribution point: $(cat "$RUNNER_TEMP/urls.json")"
+
+        # Tidy drops expired state only, so the live certificate stays readable.
+        vault write "$PKI_MOUNT/tidy" safety_buffer=1s > /dev/null
+        expect "tidy keeps a live certificate" "$leaf_serial" \
+          "$(vault read -field=serial_number "$PKI_MOUNT/cert/$leaf_serial")"
+
+    - name: Dump Vault server log
+      if: always()
+      run: |
+        cat "$RUNNER_TEMP/vault.log" || true
+        pkill -f "vault server -dev" || true
