@@ -28,7 +28,7 @@ Two [HashiCorp Vault](https://www.vaultproject.io/) plugins for the ShangMi (SM,
 | `gmsm` | `sm4-gcm96` (default) | Encrypt, decrypt, rewrap, data keys, key derivation, convergent encryption, associated data |
 | `gmsm` | `sm2` | Encrypt, decrypt, rewrap, data keys, sign, verify, certificate requests |
 | `gmsm` | `hmac` | HMAC-SM3 only, with a key size between 32 and 512 bytes |
-| `pki` | `sm2` | Root and intermediate authorities, roles with a name policy, issue, sign, revoke, CRL, tidy |
+| `pki-gmsm` | `sm2` | Root and intermediate authorities, roles with a name policy, issue, sign, revoke, CRL, tidy |
 
 HMAC-SM3 is available on every key version regardless of type, so an `sm2` key
 can also produce and verify HMACs. The older type name `ecdsa-sm2` is still
@@ -141,3 +141,9 @@ release 1.14.0. The parts of `gmsm/` that originate from those releases are
 therefore also available under the MPL-2.0. Releases 1.15.0 and later of that
 repository are licensed under BUSL-1.1 and are deliberately not used as a source
 here.
+
+The certificate authority follows the same rule against the PKI secrets engine
+of that repository, whose paths, fields and refusals it reproduces. Any part of
+`pki/` that originates from an MPL-2.0 release is likewise available under the
+MPL-2.0, no code from a BUSL-1.1 release is used, and the package itself is MIT
+licensed like the rest of this repository.
