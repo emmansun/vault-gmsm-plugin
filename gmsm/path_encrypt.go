@@ -4,14 +4,12 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"reflect"
 
 	"github.com/hashicorp/vault/sdk/framework"
 	"github.com/hashicorp/vault/sdk/helper/errutil"
-	"github.com/hashicorp/vault/sdk/helper/keysutil"
 	"github.com/hashicorp/vault/sdk/logical"
 	"github.com/mitchellh/mapstructure"
 )
@@ -71,14 +69,6 @@ type AssocDataFactory struct {
 
 func (a AssocDataFactory) GetAssociatedData() ([]byte, error) {
 	return base64.StdEncoding.DecodeString(a.Encoded)
-}
-
-type ManagedKeyFactory struct {
-	managedKeyParams keysutil.ManagedKeyParameters
-}
-
-func (m ManagedKeyFactory) GetManagedKeyParameters() keysutil.ManagedKeyParameters {
-	return m.managedKeyParams
 }
 
 func (b *backend) pathEncrypt() *framework.Path {
@@ -405,7 +395,7 @@ func (b *backend) pathEncryptWrite(ctx context.Context, req *logical.Request, d 
 			return logical.ErrorResponse("convergent encryption requires derivation to be enabled, so context is required"), nil
 		}
 
-		cfg, err := b.readConfigKeys(ctx, req)
+		cfg, err := b.readKeysMountConfig(ctx, req.Storage)
 		if err != nil {
 			return nil, err
 		}
@@ -473,22 +463,9 @@ func (b *backend) pathEncryptWrite(ctx context.Context, req *logical.Request, d 
 			factory = AssocDataFactory{item.AssociatedData}
 		}
 
-		var managedKeyFactory ManagedKeyFactory
-		if p.Type == keysutil.KeyType_MANAGED_KEY {
-			managedKeySystemView, ok := b.System().(logical.ManagedKeySystemView)
-			if !ok {
-				batchResponseItems[i].Error = errors.New("unsupported system view").Error()
-			}
-
-			managedKeyFactory = ManagedKeyFactory{
-				managedKeyParams: keysutil.ManagedKeyParameters{
-					ManagedKeySystemView: managedKeySystemView,
-					BackendUUID:          b.backendUUID,
-					Context:              ctx,
-				},
-			}
-		}
-		ciphertext, err := p.EncryptWithFactory(item.KeyVersion, item.DecodedContext, item.DecodedNonce, item.Plaintext, factory, managedKeyFactory)
+		// Managed keys are rejected when the policy is created, so no managed
+		// key factory can ever be needed here.
+		ciphertext, err := p.EncryptWithFactory(item.KeyVersion, item.DecodedContext, item.DecodedNonce, item.Plaintext, factory, nil)
 		if err != nil {
 			switch err.(type) {
 			case errutil.InternalError:
@@ -547,23 +524,16 @@ func (b *backend) pathEncryptWrite(ctx context.Context, req *logical.Request, d 
 	return batchRequestResponse(d, resp, req, successesInBatch, userErrorInBatch, internalErrorInBatch)
 }
 
+// nonceAllowed reports whether the policy can honour a caller supplied nonce.
+// Managed keys decide on their own, while SM4-GCM only consumes the value as
+// given for v1 convergent encryption; every other policy derives its own nonce
+// and would silently discard the one sent by the caller.
 func nonceAllowed(p *Policy) bool {
-	var supportedKeyType bool
-	switch p.Type {
-	case KeyType_MANAGED_KEY:
-		return true
-	case KeyType_SM4_GCM96:
-		supportedKeyType = true
-	default:
-		supportedKeyType = false
-	}
-
-	if supportedKeyType && p.ConvergentEncryption && p.ConvergentVersion == 1 {
-		// We only use the user supplied nonce for v1 convergent encryption keys
+	if p.Type == KeyType_MANAGED_KEY {
 		return true
 	}
 
-	return false
+	return p.Type == KeyType_SM4_GCM96 && p.ConvergentEncryption && p.ConvergentVersion == 1
 }
 
 // Depending on the errors in the batch, different status codes should be returned. User errors
@@ -593,32 +563,17 @@ func batchRequestResponse(d *framework.FieldData, resp *logical.Response, req *l
 	return resp, nil
 }
 
-// shouldWarnAboutNonceUsage attempts to determine if we will use a provided nonce or not. Ideally this
-// would be information returned through p.Encrypt but that would require an SDK api change and this is
-// transit specific
+// shouldWarnAboutNonceUsage reports whether the policy will actually use the
+// nonce the caller sent. The answer is only knowable here because the SDK does
+// not expose which nonce it ended up using; this is transit specific.
 func shouldWarnAboutNonceUsage(p *Policy, userSuppliedNonce []byte) bool {
-	if len(userSuppliedNonce) == 0 {
+	if len(userSuppliedNonce) == 0 || p.Type != KeyType_SM4_GCM96 {
 		return false
 	}
 
-	var supportedKeyType bool
-	switch p.Type {
-	case KeyType_SM4_GCM96:
-		supportedKeyType = true
-	default:
-		supportedKeyType = false
-	}
-
-	if supportedKeyType && p.ConvergentEncryption && p.ConvergentVersion == 1 {
-		// We only use the user supplied nonce for v1 convergent encryption keys
-		return true
-	}
-
-	if supportedKeyType && !p.ConvergentEncryption {
-		return true
-	}
-
-	return false
+	// Convergent v1 keys take the caller nonce verbatim, non-convergent keys
+	// always generate their own.
+	return !p.ConvergentEncryption || p.ConvergentVersion == 1
 }
 
 const pathEncryptHelpSyn = `Encrypt a plaintext value or a batch of plaintext

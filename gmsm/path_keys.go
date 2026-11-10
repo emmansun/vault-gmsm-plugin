@@ -222,7 +222,7 @@ func (b *backend) pathPolicyWrite(ctx context.Context, req *logical.Request, d *
 	}
 
 	if polReq.KeyType.CMACSupported() {
-		return logical.ErrorResponse(ErrCmacEntOnly.Error()), logical.ErrInvalidRequest
+		return logical.ErrorResponse(ErrCmacUnsupported.Error()), logical.ErrInvalidRequest
 	}
 
 	p, upserted, err := b.GetPolicy(ctx, polReq, b.GetRandomReader())
@@ -359,17 +359,8 @@ func (b *backend) formatKeyPolicy(p *Policy, context []byte) (*logical.Response,
 			if key.CreationTime.IsZero() {
 				key.CreationTime = time.Unix(v.DeprecatedCreationTime, 0)
 			}
-			if v.CertificateChain != nil {
-				var pemCerts []string
-				for _, derCertBytes := range v.CertificateChain {
-					pemCert := strings.TrimSpace(string(pem.EncodeToMemory(
-						&pem.Block{
-							Type:  "CERTIFICATE",
-							Bytes: derCertBytes,
-						})))
-					pemCerts = append(pemCerts, pemCert)
-				}
-				key.CertificateChain = strings.Join(pemCerts, "\n")
+			if len(v.CertificateChain) > 0 {
+				key.CertificateChain = pemCertificateChain(v.CertificateChain)
 			}
 
 			switch p.Type {
@@ -395,6 +386,18 @@ func (b *backend) pathPolicyDelete(ctx context.Context, req *logical.Request, d 
 	}
 
 	return nil, nil
+}
+
+// pemCertificateChain renders the DER encoded certificates of a key version as
+// a PEM bundle, one block per certificate.
+func pemCertificateChain(chain [][]byte) string {
+	blocks := make([]string, 0, len(chain))
+	for _, der := range chain {
+		blocks = append(blocks, strings.TrimSpace(string(pem.EncodeToMemory(
+			&pem.Block{Type: "CERTIFICATE", Bytes: der}))))
+	}
+
+	return strings.Join(blocks, "\n")
 }
 
 const pathPolicyHelpSyn = `Managed named encryption keys`

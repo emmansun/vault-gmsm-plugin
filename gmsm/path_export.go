@@ -24,7 +24,6 @@ const (
 	exportTypeHMACKey          = "hmac-key"
 	exportTypePublicKey        = "public-key"
 	exportTypeCertificateChain = "certificate-chain"
-	exportTypeCMACKey          = "cmac-key"
 )
 
 func (b *backend) pathExportKeys() *framework.Path {
@@ -38,7 +37,7 @@ func (b *backend) pathExportKeys() *framework.Path {
 		Fields: map[string]*framework.FieldSchema{
 			"type": {
 				Type:        framework.TypeString,
-				Description: "Type of key to export (encryption-key, signing-key, hmac-key)",
+				Description: "Type of key to export (encryption-key, signing-key, hmac-key, public-key, certificate-chain)",
 			},
 			"name": {
 				Type:        framework.TypeString,
@@ -64,23 +63,15 @@ func (b *backend) pathPolicyExportRead(ctx context.Context, req *logical.Request
 	name := d.Get("name").(string)
 	version := d.Get("version").(string)
 
-	supportExport := true
 	switch exportType {
-	case exportTypeEncryptionKey:
-	case exportTypeSigningKey:
-	case exportTypeHMACKey:
-	case exportTypeCMACKey:
-		// this is enterprise function only
-		supportExport = false
-	case exportTypePublicKey:
-	case exportTypeCertificateChain:
-		supportExport = true
+	case exportTypeEncryptionKey, exportTypeSigningKey, exportTypeHMACKey,
+		exportTypePublicKey, exportTypeCertificateChain:
+	case "cmac-key":
+		// Kept as a literal because SM4-CMAC keys cannot be created at all, so
+		// there is no constant worth exporting for them.
+		return logical.ErrorResponse(ErrCmacUnsupported.Error()), logical.ErrInvalidRequest
 	default:
 		return logical.ErrorResponse(fmt.Sprintf("invalid export type: %s", exportType)), logical.ErrInvalidRequest
-	}
-
-	if !supportExport {
-		return logical.ErrorResponse(ErrCmacEntOnly.Error()), logical.ErrInvalidRequest
 	}
 
 	p, _, err := b.GetPolicy(ctx, PolicyRequest{
@@ -204,30 +195,14 @@ func getExportKey(policy *Policy, key *keysutil.KeyEntry, exportType string) (st
 			return ecKey, nil
 		}
 	case exportTypeCertificateChain:
-		if key.CertificateChain == nil {
-			return "", errors.New("selected key version does not have a certificate chain imported")
+		if len(key.CertificateChain) == 0 {
+			return "", errors.New("key version has no certificate chain")
 		}
 
-		var pemCerts []string
-		for _, derCertBytes := range key.CertificateChain {
-			pemCert := strings.TrimSpace(string(pem.EncodeToMemory(
-				&pem.Block{
-					Type:  "CERTIFICATE",
-					Bytes: derCertBytes,
-				})))
-			pemCerts = append(pemCerts, pemCert)
-		}
-		certChain := strings.Join(pemCerts, "\n")
-
-		return certChain, nil
-	case exportTypeCMACKey:
-		switch policy.Type {
-		case KeyType_SM4_CMAC:
-			return strings.TrimSpace(base64.StdEncoding.EncodeToString(key.Key)), nil
-		}
+		return pemCertificateChain(key.CertificateChain), nil
 	}
 
-	return "", fmt.Errorf("unknown key type %v", policy.Type)
+	return "", fmt.Errorf("unknown export type %v", exportType)
 }
 
 func keyEntryToECPrivateKey(k *keysutil.KeyEntry, curve elliptic.Curve) (string, error) {

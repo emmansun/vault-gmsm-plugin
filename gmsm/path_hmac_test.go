@@ -10,6 +10,26 @@ import (
 	"github.com/hashicorp/vault/sdk/logical"
 )
 
+// mustAcceptHMAC posts req to the verify endpoint and fails the test unless
+// the supplied HMAC is reported as valid.
+func mustAcceptHMAC(t *testing.T, b *backend, req *logical.Request) {
+	t.Helper()
+
+	resp, err := b.HandleRequest(context.Background(), req)
+	if err != nil {
+		t.Fatalf("verify request failed: %v", err)
+	}
+	if resp == nil {
+		t.Fatal("expected non-nil response")
+	}
+	if errStr, ok := resp.Data["error"]; ok {
+		t.Fatalf("error validating hmac: %s", errStr)
+	}
+	if valid, _ := resp.Data["valid"].(bool); !valid {
+		t.Fatalf("HMAC was not accepted; req=%#v resp=%#v", *req, resp.Data)
+	}
+}
+
 func TestTransit_HMAC(t *testing.T) {
 	b, storage := createBackendWithSysView(t)
 
@@ -90,41 +110,19 @@ func TestTransit_HMAC(t *testing.T) {
 				panic(fmt.Sprintf("mismatched hashes; expected %s, got resp data %#v", expected, resp.Data))
 			}
 
-			// Now verify
-			verify := func() {
-				t.Helper()
-
-				resp, err = b.HandleRequest(context.Background(), req)
-				if err != nil {
-					t.Fatalf("%v: %v", err, resp)
-				}
-				if resp == nil {
-					t.Fatal("expected non-nil response")
-				}
-				if errStr, ok := resp.Data["error"]; ok {
-					t.Fatalf("error validating hmac: %s", errStr)
-				}
-				if resp.Data["valid"].(bool) == false {
-					t.Fatalf("error validating hmac;\nreq:\n%#v\nresp:\n%#v", *req, *resp)
-				}
-			}
-			req.Path = strings.ReplaceAll(req.Path, "hmac", "verify")
+			// Verify the HMAC that was just generated.
+			req.Path = "verify/" + strings.TrimPrefix(req.Path, "hmac/")
 			req.Data["hmac"] = value.(string)
-			verify()
+			mustAcceptHMAC(t, b, req)
 
-			// If `algorithm` parameter is used, try with `hash_algorithm` as well
-			if algorithm, ok := req.Data["algorithm"]; ok {
-				// Note that `hash_algorithm` takes precedence over `algorithm`, since the
-				// latter is deprecated.
-				req.Data["hash_algorithm"] = algorithm
-				req.Data["algorithm"] = "xxx"
-				defer func() {
-					// Restore the req fields, since it is re-used by the tests below
-					delete(req.Data, "hash_algorithm")
-					req.Data["algorithm"] = algorithm
-				}()
-
-				verify()
+			// The deprecated `algorithm` field must keep working on its own, but
+			// must lose against `hash_algorithm` when both are sent.
+			if fromData, ok := req.Data["algorithm"]; ok {
+				req.Data["hash_algorithm"] = fromData
+				req.Data["algorithm"] = "not-a-real-algorithm"
+				mustAcceptHMAC(t, b, req)
+				delete(req.Data, "hash_algorithm")
+				req.Data["algorithm"] = fromData
 			}
 		}
 

@@ -211,10 +211,6 @@ func (b *backend) pathConfigWrite(ctx context.Context, req *logical.Request, d *
 			p.AutoRotatePeriod = autoRotatePeriod
 			persistNeeded = true
 		}
-
-		if p.Type == KeyType_MANAGED_KEY && autoRotatePeriod != 0 {
-			return logical.ErrorResponse("Auto rotation can not be set for managed keys"), nil
-		}
 	}
 
 	if !persistNeeded {

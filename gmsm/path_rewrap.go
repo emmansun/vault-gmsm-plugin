@@ -12,7 +12,9 @@ import (
 	"github.com/mitchellh/mapstructure"
 )
 
-var ErrNonceNotAllowed = errors.New("provided nonce not allowed for this key")
+// ErrNonceNotAllowed is returned when a caller supplies a nonce to a key that
+// always derives its own, so honouring the request is impossible.
+var ErrNonceNotAllowed = errors.New("the key does not accept a caller supplied nonce")
 
 func (b *backend) pathRewrap() *framework.Path {
 	return &framework.Path{

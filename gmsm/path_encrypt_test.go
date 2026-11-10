@@ -643,102 +643,76 @@ func TestTransit_BatchEncryptionCase12(t *testing.T) {
 	}
 }
 
-// Case13: Incorrect input for nonce when we aren't in convergent encryption should fail the operation
-func TestTransit_EncryptionCase13(t *testing.T) {
-	var err error
+// A nonce supplied to a key that always derives its own must be rejected,
+// otherwise the caller would wrongly believe their nonce shaped the ciphertext.
+func TestEncryptRejectsUnusableNonce(t *testing.T) {
+	const plaintext = "bXkgc2VjcmV0IGRhdGE="
+	const nonce = "R80hr9eNUIuFV52e"
 
-	b, s := createBackendWithStorage(t)
-
-	// Non-batch first
-	data := map[string]interface{}{"plaintext": "bXkgc2VjcmV0IGRhdGE=", "nonce": "R80hr9eNUIuFV52e"}
-	req := &logical.Request{
-		Operation: logical.CreateOperation,
-		Path:      "encrypt/my-key",
-		Storage:   s,
-		Data:      data,
-	}
-	resp, err := b.HandleRequest(context.Background(), req)
-	if err == nil {
-		t.Fatal("expected invalid request")
-	}
-
-	batchInput := []interface{}{
-		map[string]interface{}{"plaintext": "bXkgc2VjcmV0IGRhdGE=", "nonce": "R80hr9eNUIuFV52e"},
-	}
-
-	batchData := map[string]interface{}{
-		"batch_input": batchInput,
-	}
-	batchReq := &logical.Request{
-		Operation: logical.CreateOperation,
-		Path:      "encrypt/my-key",
-		Storage:   s,
-		Data:      batchData,
-	}
-	resp, err = b.HandleRequest(context.Background(), batchReq)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if v, ok := resp.Data["http_status_code"]; !ok || v.(int) != http.StatusBadRequest {
-		t.Fatal("expected request error")
-	}
-}
-
-// Case14: Incorrect input for nonce when we are in convergent version 3 should fail
-func TestTransit_EncryptionCase14(t *testing.T) {
-	var err error
-
-	b, s := createBackendWithStorage(t)
-
-	cReq := &logical.Request{
-		Operation: logical.UpdateOperation,
-		Path:      "keys/my-key",
-		Storage:   s,
-		Data: map[string]interface{}{
-			"convergent_encryption": "true",
-			"derived":               "true",
+	cases := []struct {
+		name string
+		// keyData creates the key up front; nil relies on implicit creation
+		// during the first encrypt.
+		keyData     map[string]interface{}
+		encryptData map[string]interface{}
+	}{
+		{
+			name:        "non-convergent key",
+			encryptData: map[string]interface{}{"plaintext": plaintext, "nonce": nonce},
+		},
+		{
+			name:    "convergent key newer than v1",
+			keyData: map[string]interface{}{"convergent_encryption": "true", "derived": "true"},
+			encryptData: map[string]interface{}{
+				"plaintext": plaintext,
+				"context":   "SGVsbG8sIFdvcmxkCg==",
+				"nonce":     nonce,
+			},
 		},
 	}
-	resp, err := b.HandleRequest(context.Background(), cReq)
-	if err != nil {
-		t.Fatal(err)
-	}
 
-	// Non-batch first
-	data := map[string]interface{}{"plaintext": "bXkgc2VjcmV0IGRhdGE=", "context": "SGVsbG8sIFdvcmxkCg==", "nonce": "R80hr9eNUIuFV52e"}
-	req := &logical.Request{
-		Operation: logical.CreateOperation,
-		Path:      "encrypt/my-key",
-		Storage:   s,
-		Data:      data,
-	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b, s := createBackendWithStorage(t)
 
-	resp, err = b.HandleRequest(context.Background(), req)
-	if err == nil {
-		t.Fatal("expected invalid request")
-	}
+			if tc.keyData != nil {
+				_, err := b.HandleRequest(context.Background(), &logical.Request{
+					Operation: logical.UpdateOperation,
+					Path:      "keys/my-key",
+					Storage:   s,
+					Data:      tc.keyData,
+				})
+				if err != nil {
+					t.Fatalf("failed to create key: %v", err)
+				}
+			}
 
-	batchInput := []interface{}{
-		data,
-	}
+			// The single item form fails outright.
+			if _, err := b.HandleRequest(context.Background(), &logical.Request{
+				Operation: logical.CreateOperation,
+				Path:      "encrypt/my-key",
+				Storage:   s,
+				Data:      tc.encryptData,
+			}); err == nil {
+				t.Fatal("expected the non-batch encrypt to be rejected")
+			}
 
-	batchData := map[string]interface{}{
-		"batch_input": batchInput,
-	}
-	batchReq := &logical.Request{
-		Operation: logical.CreateOperation,
-		Path:      "encrypt/my-key",
-		Storage:   s,
-		Data:      batchData,
-	}
-	resp, err = b.HandleRequest(context.Background(), batchReq)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if v, ok := resp.Data["http_status_code"]; !ok || v.(int) != http.StatusBadRequest {
-		t.Fatal("expected request error")
+			// The batch form reports the failure per item and answers 400.
+			resp, err := b.HandleRequest(context.Background(), &logical.Request{
+				Operation: logical.CreateOperation,
+				Path:      "encrypt/my-key",
+				Storage:   s,
+				Data: map[string]interface{}{
+					"batch_input": []interface{}{tc.encryptData},
+				},
+			})
+			if err != nil {
+				t.Fatalf("batch encrypt returned an error: %v", err)
+			}
+			if code, _ := resp.Data["http_status_code"].(int); code != http.StatusBadRequest {
+				t.Fatalf("expected HTTP 400 for the failed batch, got %#v", resp.Data)
+			}
+		})
 	}
 }
 

@@ -42,3 +42,13 @@
 - Sign:           ![](./images/image-20210329134936146.png)
 
 - Verify:         ![](./images/image-20210329140556569.png)
+
+## License
+
+This plugin is distributed under the MIT license; see [LICENSE](LICENSE).
+
+The shape of its request and response fields follows the transit secrets engine
+of HashiCorp Vault, which was published under MPL-2.0 up to release 1.14.0. The
+parts of `gmsm/` that originate from those releases are therefore also available
+under the MPL-2.0. Releases 1.15.0 and later of that repository are licensed
+under BUSL-1.1 and are deliberately not used as a source here.

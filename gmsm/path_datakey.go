@@ -4,12 +4,10 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
-	"errors"
 	"fmt"
 
 	"github.com/hashicorp/vault/sdk/framework"
 	"github.com/hashicorp/vault/sdk/helper/errutil"
-	"github.com/hashicorp/vault/sdk/helper/keysutil"
 	"github.com/hashicorp/vault/sdk/logical"
 )
 
@@ -138,23 +136,9 @@ func (b *backend) pathDatakeyWrite(ctx context.Context, req *logical.Request, d 
 		return nil, err
 	}
 
-	var managedKeyFactory keysutil.ManagedKeyFactory
-	if p.Type == keysutil.KeyType_MANAGED_KEY {
-		managedKeySystemView, ok := b.System().(logical.ManagedKeySystemView)
-		if !ok {
-			return nil, errors.New("unsupported system view")
-		}
-
-		managedKeyFactory = ManagedKeyFactory{
-			managedKeyParams: keysutil.ManagedKeyParameters{
-				ManagedKeySystemView: managedKeySystemView,
-				BackendUUID:          b.backendUUID,
-				Context:              ctx,
-			},
-		}
-	}
-
-	ciphertext, err := p.EncryptWithFactory(ver, context, nonce, base64.StdEncoding.EncodeToString(newKey), nil, managedKeyFactory)
+	// Managed keys are rejected when the policy is created, so no managed key
+	// factory can ever be needed here.
+	ciphertext, err := p.EncryptWithFactory(ver, context, nonce, base64.StdEncoding.EncodeToString(newKey), nil, nil)
 	if err != nil {
 		switch err.(type) {
 		case errutil.UserError:

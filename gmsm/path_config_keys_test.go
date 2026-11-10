@@ -1,6 +1,3 @@
-// Copyright (c) HashiCorp, Inc.
-// SPDX-License-Identifier: BUSL-1.1
-
 package gmsm
 
 import (
@@ -10,61 +7,61 @@ import (
 	"github.com/hashicorp/vault/sdk/logical"
 )
 
-func TestTransit_ConfigKeys(t *testing.T) {
-	b, s := createBackendWithSysView(t)
+func TestConfigKeysDisableUpsert(t *testing.T) {
+	b, storage := createBackendWithSysView(t)
 
-	doReq := func(req *logical.Request) *logical.Response {
+	mustRun := func(req *logical.Request) *logical.Response {
+		t.Helper()
 		resp, err := b.HandleRequest(context.Background(), req)
-		if err != nil || (resp != nil && resp.IsError()) {
-			t.Fatalf("got err:\n%#v\nreq:\n%#v\n", err, *req)
+		if err != nil {
+			t.Fatalf("unexpected error %v for %#v", err, *req)
+		}
+		if resp != nil && resp.IsError() {
+			t.Fatalf("unexpected error response %v for %#v", resp.Error(), *req)
 		}
 		return resp
 	}
-	doErrReq := func(req *logical.Request) {
+	mustReject := func(req *logical.Request) {
+		t.Helper()
 		resp, err := b.HandleRequest(context.Background(), req)
-		if err == nil {
-			if resp == nil || !resp.IsError() {
-				t.Fatalf("expected error; req:\n%#v\n", *req)
-			}
+		if err != nil {
+			return
+		}
+		if resp == nil || !resp.IsError() {
+			t.Fatalf("expected a rejection for %#v", *req)
 		}
 	}
 
-	// First read the global config
 	req := &logical.Request{
-		Storage:   s,
+		Storage:   storage,
 		Operation: logical.ReadOperation,
 		Path:      "config/keys",
 	}
-	resp := doReq(req)
-	if resp.Data["disable_upsert"].(bool) != false {
-		t.Fatalf("expected disable_upsert to be false; got: %v", resp)
+
+	// Nothing has been configured yet, so upserting is allowed.
+	if got := mustRun(req).Data["disable_upsert"].(bool); got {
+		t.Fatalf("expected disable_upsert to default to false, got %v", got)
 	}
 
-	// Ensure we can upsert.
+	// An unknown key name is created on the fly while upserting is allowed.
 	req.Operation = logical.CreateOperation
-	req.Path = "encrypt/upsert-1"
-	req.Data = map[string]interface{}{
-		"plaintext": "aGVsbG8K",
-	}
-	doReq(req)
+	req.Path = "encrypt/upsert-allowed"
+	req.Data = map[string]interface{}{"plaintext": "aGVsbG8K"}
+	mustRun(req)
 
-	// Disable upserting.
+	// Turn implicit key creation off.
 	req.Operation = logical.UpdateOperation
 	req.Path = "config/keys"
-	req.Data = map[string]interface{}{
-		"disable_upsert": true,
-	}
-	doReq(req)
+	req.Data = map[string]interface{}{"disable_upsert": true}
+	mustRun(req)
 
-	// Attempt upserting again, it should fail.
+	// A second unknown key name must now be refused.
 	req.Operation = logical.CreateOperation
-	req.Path = "encrypt/upsert-2"
-	req.Data = map[string]interface{}{
-		"plaintext": "aGVsbG8K",
-	}
-	doErrReq(req)
+	req.Path = "encrypt/upsert-denied"
+	req.Data = map[string]interface{}{"plaintext": "aGVsbG8K"}
+	mustReject(req)
 
-	// Redoing this with the first key should succeed.
-	req.Path = "encrypt/upsert-1"
-	doReq(req)
+	// Keys that already exist keep working.
+	req.Path = "encrypt/upsert-allowed"
+	mustRun(req)
 }

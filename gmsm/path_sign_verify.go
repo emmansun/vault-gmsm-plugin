@@ -3,10 +3,8 @@ package gmsm
 import (
 	"context"
 	"encoding/base64"
-	"errors"
 	"fmt"
 
-	"github.com/hashicorp/go-secure-stdlib/parseutil"
 	"github.com/hashicorp/vault/sdk/framework"
 	"github.com/hashicorp/vault/sdk/helper/errutil"
 	"github.com/hashicorp/vault/sdk/helper/keysutil"
@@ -148,11 +146,6 @@ func (b *backend) pathVerify() *framework.Path {
 				Description: "The HMAC, including vault header/key version",
 			},
 
-			"cmac": {
-				Type:        framework.TypeString,
-				Description: "The CMAC, including vault header/key version",
-			},
-
 			"input": {
 				Type:        framework.TypeString,
 				Description: "The base64-encoded input data to verify",
@@ -173,7 +166,7 @@ func (b *backend) pathVerify() *framework.Path {
 
 Defaults to "sm3". Not valid for all key types. See note about
 none on signing path.`,
-			},			
+			},
 
 			"algorithm": {
 				Type:        framework.TypeString,
@@ -195,7 +188,7 @@ none on signing path.`,
 			"batch_input": {
 				Type: framework.TypeSlice,
 				Description: `Specifies a list of items for processing. When this parameter is set,
-any supplied  'input', 'hmac', 'cmac' or 'signature' parameters will be ignored. Responses are returned in the
+any supplied 'input', 'hmac' or 'signature' parameters will be ignored. Responses are returned in the
 'batch_results' array component of the 'data' element of the response. Any batch output will
 preserve the order of the batch input`,
 			},
@@ -280,21 +273,9 @@ func (b *backend) pathSignWrite(ctx context.Context, req *logical.Request, d *fr
 			continue
 		}
 
-		var managedKeyParameters keysutil.ManagedKeyParameters
-		if p.Type == KeyType_MANAGED_KEY {
-			managedKeySystemView, ok := b.System().(logical.ManagedKeySystemView)
-			if !ok {
-				return nil, errors.New("unsupported system view")
-			}
-
-			managedKeyParameters = keysutil.ManagedKeyParameters{
-				ManagedKeySystemView: managedKeySystemView,
-				BackendUUID:          b.backendUUID,
-				Context:              ctx,
-			}
-		}
-
-		sig, err := p.SignWithOptions(ver, nil, input, &SigningOptions{Prehashed: prehashed, Marshaling: marshaling, ManagedKeyParams: managedKeyParameters})
+		// Managed keys are rejected when the policy is created, so no managed
+		// key parameters can ever be needed here.
+		sig, err := p.SignWithOptions(ver, nil, input, &SigningOptions{Prehashed: prehashed, Marshaling: marshaling})
 		if err != nil {
 			if batchInputRaw != nil {
 				response[i].Error = err.Error()
@@ -369,63 +350,39 @@ func (b *backend) pathVerifyWrite(ctx context.Context, req *logical.Request, d *
 		if hmac, ok := d.GetOk("hmac"); ok {
 			batchInputItems[0]["hmac"] = hmac.(string)
 		}
-		if cmac, ok := d.GetOk("cmac"); ok {
-			batchInputItems[0]["cmac"] = cmac.(string)
-		}
 		if sig, ok := d.GetOk("signature"); ok {
 			batchInputItems[0]["signature"] = sig.(string)
 		}
 	}
 
-	// For simplicity, 'signature' and 'hmac' cannot be mixed across batch_input elements.
-	// If one batch_input item is 'signature', they all must be 'signature'.
-	// If one batch_input item is 'hmac', they all must be 'hmac'.
-	sigFound := false
-	hmacFound := false
-	cmacFound := false
-	missing := false
-	for _, v := range batchInputItems {
-		if _, ok := v["signature"]; ok {
-			sigFound = true
-		} else if _, ok := v["hmac"]; ok {
-			hmacFound = true
-		} else if _, ok := v["cmac"]; ok {
-			cmacFound = true
+	// Every batch item must carry the same kind of authenticator: either all of
+	// them verify a signature or all of them verify an HMAC.
+	signed, hashed, unspecified := 0, 0, 0
+	for _, item := range batchInputItems {
+		if _, ok := item["signature"]; ok {
+			signed++
+		} else if _, ok := item["hmac"]; ok {
+			hashed++
 		} else {
-			missing = true
+			unspecified++
 		}
 	}
 
-	optionsSet := numBooleansTrue(sigFound, hmacFound, cmacFound)
-
 	switch {
-	case batchInputRaw == nil && optionsSet > 1:
-		return logical.ErrorResponse("provide one of 'signature', 'hmac' or 'cmac'"), logical.ErrInvalidRequest
-
-	case batchInputRaw == nil && optionsSet == 0:
-		return logical.ErrorResponse("missing 'signature', 'hmac' or 'cmac' were given to verify"), logical.ErrInvalidRequest
-
-	case optionsSet > 1:
-		return logical.ErrorResponse("elements of batch_input must all provide either 'signature', 'hmac' or 'cmac'"), logical.ErrInvalidRequest
-
-	case missing && sigFound:
+	case batchInputRaw == nil && signed+hashed > 1:
+		return logical.ErrorResponse("provide only one of 'signature' or 'hmac'"), logical.ErrInvalidRequest
+	case batchInputRaw == nil && signed+hashed == 0:
+		return logical.ErrorResponse("one of 'signature' or 'hmac' must be supplied"), logical.ErrInvalidRequest
+	case signed > 0 && hashed > 0:
+		return logical.ErrorResponse("batch_input elements must all verify either a 'signature' or an 'hmac'"), logical.ErrInvalidRequest
+	case signed > 0 && unspecified > 0:
 		return logical.ErrorResponse("some elements of batch_input are missing 'signature'"), logical.ErrInvalidRequest
-
-	case missing && hmacFound:
+	case hashed > 0 && unspecified > 0:
 		return logical.ErrorResponse("some elements of batch_input are missing 'hmac'"), logical.ErrInvalidRequest
-
-	case missing && cmacFound:
-		return logical.ErrorResponse("some elements of batch_input are missing 'cmac'"), logical.ErrInvalidRequest
-
-	case optionsSet == 0:
-		return logical.ErrorResponse("no batch_input elements have 'signature', 'hmac' or 'cmac'"), logical.ErrInvalidRequest
-
-	case hmacFound:
+	case signed+hashed == 0:
+		return logical.ErrorResponse("no batch_input element supplies 'signature' or 'hmac'"), logical.ErrInvalidRequest
+	case hashed > 0:
 		return b.pathHMACVerify(ctx, req, d)
-
-	case cmacFound:
-		return b.pathCMACVerify(ctx, req, d)
-
 	}
 
 	name := d.Get("name").(string)
@@ -469,9 +426,11 @@ func (b *backend) pathVerifyWrite(ctx context.Context, req *logical.Request, d *
 			continue
 		}
 
-		strInput, err := parseutil.ParseString(rawInput)
-		if err != nil {
-			response[i].Error = fmt.Sprintf("unable to decode input as base64: %s", err)
+		// A non-string input cannot be base64 decoded, so it is reported as a
+		// user error alongside the other malformed items.
+		strInput, ok := rawInput.(string)
+		if !ok {
+			response[i].Error = fmt.Sprintf("unable to decode input as base64: unsupported input type %T", rawInput)
 			response[i].err = logical.ErrInvalidRequest
 			continue
 		}
@@ -483,34 +442,14 @@ func (b *backend) pathVerifyWrite(ctx context.Context, req *logical.Request, d *
 			continue
 		}
 
-		sigRaw, ok := item["signature"].(string)
+		sig, ok := item["signature"].(string)
 		if !ok {
 			response[i].Error = "missing signature"
 			response[i].err = logical.ErrInvalidRequest
 			continue
 		}
-		sig, err := parseutil.ParseString(sigRaw)
-		if err != nil {
-			response[i].Error = fmt.Sprintf("failed to parse signature as a string: %s", err)
-			response[i].err = logical.ErrInvalidRequest
-			continue
-		}
 
-		var managedKeyParameters keysutil.ManagedKeyParameters
-		if p.Type == KeyType_MANAGED_KEY {
-			managedKeySystemView, ok := b.System().(logical.ManagedKeySystemView)
-			if !ok {
-				return nil, errors.New("unsupported system view")
-			}
-
-			managedKeyParameters = keysutil.ManagedKeyParameters{
-				ManagedKeySystemView: managedKeySystemView,
-				BackendUUID:          b.backendUUID,
-				Context:              ctx,
-			}
-		}
-
-		valid, err := p.VerifySignatureWithOptions(nil, input, sig, &SigningOptions{Prehashed: prehashed, Marshaling: marshaling, ManagedKeyParams: managedKeyParameters})
+		valid, err := p.VerifySignatureWithOptions(nil, input, sig, &SigningOptions{Prehashed: prehashed, Marshaling: marshaling})
 		if err != nil {
 			switch err.(type) {
 			case errutil.UserError:
@@ -530,9 +469,9 @@ func (b *backend) pathVerifyWrite(ctx context.Context, req *logical.Request, d *
 	// Generate the response
 	resp := &logical.Response{}
 	if batchInputRaw != nil {
-		// Copy the references
-		for i := range batchInputItems {
-			if ref, err := parseutil.ParseString(batchInputItems[i]["reference"]); err == nil {
+		// Copy the caller references onto the responses.
+		for i, item := range batchInputItems {
+			if ref, ok := item["reference"].(string); ok {
 				response[i].Reference = ref
 			}
 		}
@@ -552,16 +491,6 @@ func (b *backend) pathVerifyWrite(ctx context.Context, req *logical.Request, d *
 	}
 
 	return resp, nil
-}
-
-func numBooleansTrue(bools ...bool) int {
-	numSet := 0
-	for _, value := range bools {
-		if value {
-			numSet++
-		}
-	}
-	return numSet
 }
 
 const pathSignHelpSyn = `Generate a signature for input data using the named key`

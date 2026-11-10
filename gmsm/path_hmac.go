@@ -245,17 +245,13 @@ func (b *backend) pathHMACVerify(ctx context.Context, req *logical.Request, d *f
 	name := d.Get("name").(string)
 	algorithm := d.Get("urlalgorithm").(string)
 	if algorithm == "" {
-		hashAlgorithmRaw, hasHashAlgorithm := d.GetOk("hash_algorithm")
-		algorithmRaw, hasAlgorithm := d.GetOk("algorithm")
-
-		// As `algorithm` is deprecated, make sure we only read it if
-		// `hash_algorithm` is not present.
-		switch {
-		case hasHashAlgorithm:
-			algorithm = hashAlgorithmRaw.(string)
-		case hasAlgorithm:
-			algorithm = algorithmRaw.(string)
-		default:
+		// `hash_algorithm` replaced the deprecated `algorithm` field: the old
+		// one is still honoured, but only when the new one was not supplied.
+		if raw, ok := d.GetOk("hash_algorithm"); ok {
+			algorithm = raw.(string)
+		} else if raw, ok := d.GetOk("algorithm"); ok {
+			algorithm = raw.(string)
+		} else {
 			algorithm = d.Get("hash_algorithm").(string)
 		}
 	}

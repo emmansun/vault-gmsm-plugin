@@ -1,4 +1,8 @@
-// Reference: https://github.com/hashicorp/vault/blob/main/builtin/logical/transit/backend.go
+// The backend layout mirrors the transit secrets engine of HashiCorp Vault. The
+// reference below is the last Vault release published under MPL-2.0 (1.14.x);
+// later releases of that repository are licensed under BUSL-1.1.
+//
+// Reference: https://github.com/hashicorp/vault/blob/v1.14.0/builtin/logical/transit/backend.go
 package gmsm
 
 import (
@@ -31,7 +35,11 @@ const (
 	minCacheSize = 10
 )
 
-var ErrCmacEntOnly = errors.New("CMAC operations are only available in enterprise versions of Vault")
+// ErrCmacUnsupported is returned by every path that would need SM4-CMAC key
+// material. This plugin neither creates sm4-cmac keys nor implements CMAC
+// signing or verification, so such requests are rejected explicitly instead of
+// silently producing a wrong result.
+var ErrCmacUnsupported = errors.New("sm4-cmac keys are not supported by this plugin")
 
 func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend, error) {
 	b, err := Backend(ctx, conf)
@@ -83,8 +91,6 @@ func Backend(ctx context.Context, conf *logical.BackendConfig) (*backend, error)
 		BackendType:    logical.TypeLogical,
 		RunningVersion: version,
 		PeriodicFunc:   b.periodicFunc,
-		InitializeFunc: b.initialize,
-		Clean:          b.cleanup,
 	}
 
 	b.backendUUID = conf.BackendUUID
@@ -110,14 +116,11 @@ func Backend(ctx context.Context, conf *logical.BackendConfig) (*backend, error)
 		return nil, err
 	}
 
-	b.setupEnt()
-
 	return &b, nil
 }
 
 type backend struct {
 	*framework.Backend
-	entBackend
 
 	lm *LockManager
 	// Lock to make changes to any of the backend's cache configuration.
@@ -206,11 +209,7 @@ func (b *backend) periodicFunc(ctx context.Context, req *logical.Request) error 
 		b.autoRotateOnce = sync.Once{}
 	}
 
-	if err != nil {
-		return err
-	}
-
-	return b.periodicFuncEnt(ctx, req)
+	return err
 }
 
 // autoRotateKeys retrieves all transit keys and rotates those which have an
@@ -298,30 +297,4 @@ func (b *backend) rotateIfRequired(ctx context.Context, req *logical.Request, ke
 
 	}
 	return nil
-}
-
-func (b *backend) initialize(ctx context.Context, request *logical.InitializationRequest) error {
-	return b.initializeEnt(ctx, request)
-}
-
-func (b *backend) cleanup(ctx context.Context) {
-	b.cleanupEnt(ctx)
-}
-
-type entBackend struct{}
-
-func (b *backend) initializeEnt(_ context.Context, _ *logical.InitializationRequest) error {
-	return nil
-}
-
-func (b *backend) invalidateEnt(_ context.Context, _ string) {}
-
-func (b *backend) periodicFuncEnt(_ context.Context, _ *logical.Request) error { return nil }
-
-func (b *backend) cleanupEnt(_ context.Context) {}
-
-func (b *backend) setupEnt() {}
-
-func (b *backend) pathCMACVerify(_ context.Context, _ *logical.Request, _ *framework.FieldData) (*logical.Response, error) {
-	return logical.ErrorResponse(ErrCmacEntOnly.Error()), nil
 }
