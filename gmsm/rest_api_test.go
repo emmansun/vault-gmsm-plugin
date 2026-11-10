@@ -330,11 +330,15 @@ func TestRESTAPI(t *testing.T) {
 		wantStatus(t, status, http.StatusBadRequest, "generate a request for an unknown key")
 		wantError(t, body, "not found")
 
-		// Reading a key that does not exist is not an error: Vault answers the
-		// empty response of the handler with 204, which is what a client has to
-		// treat as "no such key" rather than a failed request.
-		status, _ = c.call(http.MethodGet, "keys/"+missingName, nil)
-		wantStatus(t, status, http.StatusNoContent, "read an unknown key")
+		// The handler answers a missing key with an empty response rather than
+		// an error, so Vault turns it into a bare 404: the errors array is
+		// empty and there is no message to read. A client can only go by the
+		// status code here, which is the contract this asserts.
+		status, body = c.call(http.MethodGet, "keys/"+missingName, nil)
+		wantStatus(t, status, http.StatusNotFound, "read an unknown key")
+		if errors, ok := body["errors"].([]any); !ok || len(errors) != 0 {
+			t.Fatalf("reading an unknown key answered with more than an empty error list: %v", body)
+		}
 
 		status, body = c.call(http.MethodPost, "keys/"+keyName+"/set-certificate", map[string]any{
 			"certificate_chain": "not a pem block",

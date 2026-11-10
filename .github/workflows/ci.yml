@@ -133,6 +133,11 @@ jobs:
       run: |
         set -euo pipefail
 
+        # The server's own message is already in the log, so the annotation only
+        # has to name the command that broke the step. Wrapping vault to capture
+        # its stderr would hide that message from a caller that redirects it.
+        trap 'echo "::error::failed: ${BASH_COMMAND:0:200}"' ERR
+
         fail() {
           echo "::error::$1"
           exit 1
