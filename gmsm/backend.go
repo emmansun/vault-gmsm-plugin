@@ -70,6 +70,8 @@ func Backend(ctx context.Context, conf *logical.BackendConfig) (*backend, error)
 			b.pathRewrap(),
 			b.pathCreateCsr(),
 			b.pathSetCertificate(),
+			b.pathImportKey(),
+			b.pathImportKeyVersion(),
 			b.pathKeys(),
 			b.pathListKeys(),
 			b.pathExportKeys(),
@@ -177,6 +179,13 @@ func (b *backend) GetPolicy(ctx context.Context, polReq PolicyRequest, rand io.R
 		return p, false, err
 	}
 	return p, true, nil
+}
+
+// ImportKey creates a policy from the supplied material, or completes a policy
+// whose latest version holds only a public key. The caller owns the validation
+// of the material; this only hands it to the lock manager.
+func (b *backend) ImportKey(ctx context.Context, polReq PolicyRequest, key []byte) error {
+	return b.lm.ImportPolicy(ctx, polReq, key, b.GetRandomReader())
 }
 
 func (b *backend) invalidate(_ context.Context, key string) {
@@ -295,8 +304,18 @@ func (b *backend) rotateIfRequired(ctx context.Context, req *logical.Request, ke
 		if b.Logger().IsDebug() {
 			b.Logger().Debug("automatically rotating key", "key", key)
 		}
-		return p.Rotate(ctx, req.Storage, b.GetRandomReader())
+		if err := p.Rotate(ctx, req.Storage, b.GetRandomReader()); err != nil {
+			return err
+		}
 
+		// The ring now holds a generated version, so import_version has to
+		// refuse from here on.
+		if p.Imported && !p.ImportedKeyRotated {
+			p.ImportedKeyRotated = true
+			return p.Persist(ctx, req.Storage)
+		}
+
+		return nil
 	}
 	return nil
 }

@@ -8,7 +8,8 @@
 
 A [HashiCorp Vault](https://www.vaultproject.io/) secrets engine for the ShangMi
 (SM, 国密) algorithms: SM4-GCM encryption and SM2 signing. Keys are generated
-inside Vault and never leave the mount unless the key is marked exportable.
+inside Vault, or imported from material you already hold, and never leave the
+mount unless the key is marked exportable.
 
 The request and response shapes follow the transit secrets engine of Vault 1.14,
 so existing transit tooling, policies and client libraries carry over with the
@@ -36,6 +37,7 @@ mount path changed.
     - [Hashing and HMAC](#hashing-and-hmac)
     - [Export](#export)
   - [Certificates](#certificates)
+  - [Importing keys](#importing-keys)
   - [Differences from Vault transit](#differences-from-vault-transit)
   - [Operational notes](#operational-notes)
   - [Development](#development)
@@ -51,6 +53,9 @@ mount path changed.
 
 HMAC-SM3 is available on every key version regardless of type, so an
 `ecdsa-sm2` key can also produce and verify HMACs.
+
+All three types also accept imported key material; see
+[Importing keys](#importing-keys).
 
 The following are deliberately rejected rather than half-implemented:
 
@@ -198,6 +203,8 @@ All paths are relative to the mount, `gmsm` in the examples.
 | DELETE | `keys/:name` | Delete a key; requires `deletion_allowed` |
 | POST | `keys/:name/config` | Update key configuration |
 | POST | `keys/:name/rotate` | Create a new key version |
+| POST | `keys/:name/import` | Create a key from imported key material |
+| POST | `keys/:name/import_version` | Add a version to an imported key |
 | POST | `keys/:name/trim` | Remove versions below `min_available_version` |
 | POST | `keys/:name/csr` | Generate a certificate request for a version |
 | POST | `keys/:name/set-certificate` | Store an externally signed certificate chain |
@@ -397,6 +404,54 @@ $ vault read gmsm/export/certificate-chain/app-key
 
 Certificates require a key type that can sign, which today means `ecdsa-sm2`.
 
+## Importing keys
+
+`keys/:name/import` creates a key from material that was generated elsewhere,
+and `keys/:name/import_version` adds further material to a key that was itself
+imported. Both take the material in the request body, so the transport has to be
+trusted; the wrapping-key exchange that transit offers is not implemented.
+
+```bash
+vault write gmsm/keys/imported type=ecdsa-sm2 private_key=@private.pem
+vault write gmsm/keys/imported/import_version private_key=@next.pem
+```
+
+| Field | Path | Notes |
+| --- | --- | --- |
+| `type` | `import` | `ecdsa-sm2`, `sm4-gcm96` or `hmac`. Required |
+| `private_key` | both | `ecdsa-sm2` only. PEM, either PKCS#8 (`BEGIN PRIVATE KEY`) or SEC 1 (`BEGIN EC PRIVATE KEY`) |
+| `public_key` | both | `ecdsa-sm2` only. PEM SPKI (`BEGIN PUBLIC KEY`) |
+| `key` | both | `sm4-gcm96` and `hmac` only. Base64, 16 bytes for SM4 and 32–512 for HMAC |
+| `exportable` | `import` | Allows the material to be exported again |
+| `allow_plaintext_backup` | `import` | Allows a plaintext backup |
+| `allow_rotation` | `import` | Allows `rotate` to replace the imported version with a generated one. Off by default |
+| `auto_rotate_period` | `import` | Requires `allow_rotation`, and must be at least `1h` |
+| `version` | `import_version` | Completes the version that holds only a public key |
+
+The rules the paths enforce:
+
+- `import` only creates. It answers `already exists` for a name that is taken,
+  pointing at `import_version`, so a typo cannot splice external material onto an
+  existing key.
+- `import_version` only works on imported keys. A key created by Vault refuses
+  further material, and so does an imported key that has already been rotated
+  inside Vault: its ring then holds generated versions, and mixing the two is
+  refused rather than done quietly.
+- A version that holds only a public key can be used for `verify` and `encrypt`.
+  `sign` and `decrypt` fail with "does not contain a private part" until
+  `import_version` supplies the private key; the public key has to match the one
+  stored for that version, which is what makes the completion safe.
+- What `export/signing-key` and `export/encryption-key` produce can be passed
+  straight back to `import`, which is how a key moves between mounts.
+- An imported key reports `imported_key=true`, plus
+  `imported_key_allow_rotation` when rotation was allowed.
+- `keys/:name/config` refuses an `auto_rotate_period` on an imported key that did
+  not allow rotation, because that rotation could never happen.
+
+After a rotation the imported material stays on the mount as the older versions,
+so decrypting and verifying with it keeps working until
+`min_decryption_version` retires it.
+
 ## Differences from Vault transit
 
 | | Transit | This plugin |
@@ -406,7 +461,7 @@ Certificates require a key type that can sign, which today means `ecdsa-sm2`.
 | Hashing | SHA-2 family | SM3 only |
 | Signing input hashing | Configurable | Always SM3, optionally over a pre-computed digest |
 | User identifier | none | `uid` on sign and verify, mixed into the SM2 `Z` value |
-| Key import | supported | not implemented |
+| Key import | supported | `import` and `import_version`, with plaintext material only: no wrapping key, and `import_version` stops once the key has been rotated in Vault |
 
 Everything else — versioned ciphertexts and signatures, key derivation,
 convergent encryption, associated data, batch requests, export, backup and
@@ -428,6 +483,9 @@ restore — follows the transit behaviour.
   `partial_failure_response_code` if the caller needs a non-200 status to notice.
 - **The policy cache is per mount.** `cache-config` sets how many keys stay
   resident in memory; the default is unlimited and the minimum is 10.
+- **Imported material arrives in the request.** Send it over TLS only; unlike
+  transit there is no wrapping-key exchange. Once stored, an imported key is
+  protected exactly like a generated one.
 
 ## Development
 

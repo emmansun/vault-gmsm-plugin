@@ -323,6 +323,12 @@ type Policy struct {
 
 	// AllowImportedKeyRotation indicates whether an imported key may be rotated by Vault
 	AllowImportedKeyRotation bool
+
+	// ImportedKeyRotated records that an imported key has been rotated inside
+	// Vault. From that point on the ring holds both imported and generated
+	// versions, so importing further material is refused rather than mixing the
+	// two quietly.
+	ImportedKeyRotated bool
 }
 
 func (p *Policy) Lock(exclusive bool) {
@@ -868,6 +874,11 @@ func (p *Policy) DecryptWithFactory(context, nonce []byte, value string, factori
 		if err != nil {
 			return "", err
 		}
+		// The public half may be imported on its own, in which case the version
+		// cannot decrypt.
+		if keyEntry.IsPrivateKeyMissing() {
+			return "", errutil.UserError{Err: "requested version for decryption does not contain a private part"}
+		}
 		key, err := sm2.NewPrivateKeyFromInt(keyEntry.EC_D)
 		if err != nil {
 			return "", err
@@ -1215,9 +1226,9 @@ func (p *Policy) ImportPublicOrPrivate(ctx context.Context, storage logical.Stor
 		var parsedKey any
 		var err error
 		if isPrivateKey {
-			parsedKey, err = smx509.ParsePKCS8PrivateKey(key)
+			parsedKey, err = parsePrivateKey(key)
 			if err != nil {
-				return fmt.Errorf("error parsing asymmetric key: %s", err)
+				return err
 			}
 		} else {
 			pemBlock, _ := pem.Decode(key)
@@ -1753,11 +1764,9 @@ func (p *Policy) ImportPrivateKeyForVersion(ctx context.Context, storage logical
 	}
 
 	// Parse key
-	parsedPrivateKey, err := smx509.ParsePKCS8PrivateKey(key)
+	parsedPrivateKey, err := parsePrivateKey(key)
 	if err != nil {
-		if strings.Contains(err.Error(), "unknown elliptic curve") {
-			return fmt.Errorf("error parsing asymmetric key: %s", err)
-		}
+		return err
 	}
 
 	switch parsedPrivateKey.(type) {
@@ -1843,6 +1852,40 @@ func parseFromKey(ke *keysutil.KeyEntry, PolKeyType KeyType, parsedKey any) erro
 	}
 
 	return nil
+}
+
+// parsePrivateKey accepts the private key encodings this plugin hands out and
+// the ones common SM tooling emits: PKCS#8 (BEGIN PRIVATE KEY, what GMSSL and
+// current OpenSSL produce) and SEC 1 (BEGIN EC PRIVATE KEY, what
+// export/signing-key returns). A bare DER of either encoding works too, which
+// keeps the parser usable on material that arrived without its PEM armour.
+func parsePrivateKey(key []byte) (any, error) {
+	if block, _ := pem.Decode(key); block != nil {
+		key = block.Bytes
+	}
+
+	if parsed, err := smx509.ParsePKCS8PrivateKey(key); err == nil {
+		// PKCS#8 can carry any algorithm; only the SM2 form is usable here.
+		sm2Key, ok := parsed.(*sm2.PrivateKey)
+		if !ok {
+			return nil, fmt.Errorf("error parsing private key: expected an SM2 private key, got %T", parsed)
+		}
+
+		return sm2Key, nil
+	}
+
+	ecKey, err := smx509.ParseECPrivateKey(key)
+	if err != nil {
+		return nil, fmt.Errorf("error parsing private key: expected a PKCS#8 or SEC 1 encoded key: %w", err)
+	}
+	if ecKey.Curve != sm2.P256() {
+		return nil, fmt.Errorf("error parsing private key: expected the %s curve, got %s",
+			sm2.P256().Params().Name, ecKey.Curve.Params().Name)
+	}
+
+	// ParseECPrivateKey is typed for the standard library, so the SM2 form has
+	// to be rebuilt from the scalar it carries.
+	return sm2.NewPrivateKeyFromInt(ecKey.D)
 }
 
 // CreateCsr builds a PEM encoded certificate request for the given key version.

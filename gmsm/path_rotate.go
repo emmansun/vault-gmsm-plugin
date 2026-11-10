@@ -2,6 +2,7 @@ package gmsm
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/hashicorp/vault/sdk/framework"
 	"github.com/hashicorp/vault/sdk/logical"
@@ -14,7 +15,7 @@ func (b *backend) pathRotate() *framework.Path {
 			OperationPrefix: operationPrefix,
 			OperationVerb:   "rotate",
 			OperationSuffix: "key",
-		},		
+		},
 		Fields: map[string]*framework.FieldSchema{
 			"name": {
 				Type:        framework.TypeString,
@@ -27,7 +28,7 @@ func (b *backend) pathRotate() *framework.Path {
 			"managed_key_id": {
 				Type:        framework.TypeString,
 				Description: "The UUID of the managed key to use for the new version of this transit key",
-			},			
+			},
 		},
 
 		Callbacks: map[logical.Operation]framework.OperationFunc{
@@ -61,6 +62,12 @@ func (b *backend) pathRotateWrite(ctx context.Context, req *logical.Request, d *
 
 	defer p.Unlock()
 
+	// Rotating an imported key replaces external material with a generated
+	// version, so it stays off until the import allowed it.
+	if p.Imported && !p.AllowImportedKeyRotation {
+		return logical.ErrorResponse(fmt.Sprintf("key %q is imported and rotation is not allowed; import it with allow_rotation=true to permit this", name)), logical.ErrInvalidRequest
+	}
+
 	if p.Type == KeyType_MANAGED_KEY {
 		var keyId string
 		keyId, err = GetManagedKeyUUID(ctx, b, managedKeyName, managedKeyId)
@@ -75,6 +82,15 @@ func (b *backend) pathRotateWrite(ctx context.Context, req *logical.Request, d *
 
 	if err != nil {
 		return nil, err
+	}
+
+	// Record that the ring now holds a generated version, so import_version
+	// refuses to splice external material in later.
+	if p.Imported && !p.ImportedKeyRotated {
+		p.ImportedKeyRotated = true
+		if err := p.Persist(ctx, req.Storage); err != nil {
+			return nil, err
+		}
 	}
 
 	return b.formatKeyPolicy(p, nil)

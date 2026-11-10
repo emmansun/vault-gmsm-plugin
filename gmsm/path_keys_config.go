@@ -207,6 +207,13 @@ func (b *backend) pathConfigWrite(ctx context.Context, req *logical.Request, d *
 			return logical.ErrorResponse("auto rotate period must be 0 to disable or at least an hour"), nil
 		}
 
+		// An imported key that may not be rotated would accept the period and
+		// then never rotate, so it is refused here instead.
+		if autoRotatePeriod != 0 && p.Imported && !p.AllowImportedKeyRotation {
+			return logical.ErrorResponse(fmt.Sprintf(
+				"key %q is imported and rotation is not allowed, so it cannot be rotated automatically; import it with allow_rotation=true to permit this", name)), nil
+		}
+
 		if autoRotatePeriod != p.AutoRotatePeriod {
 			p.AutoRotatePeriod = autoRotatePeriod
 			persistNeeded = true
