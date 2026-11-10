@@ -46,7 +46,7 @@ ciphertext; "wrapped" will return the ciphertext only.`,
 			"bits": {
 				Type: framework.TypeInt,
 				Description: `Number of bits for the key; currently 128, 256,
-and 512 bits are supported. Defaults to 256.`,
+and 512 bits are supported. Defaults to 128.`,
 				Default: 128,
 			},
 
