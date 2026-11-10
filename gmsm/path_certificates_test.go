@@ -174,7 +174,7 @@ func encodeCertificatePEM(der []byte, blockType string) string {
 
 func TestCreateCsrEndpoint(t *testing.T) {
 	b, s := createBackendWithStorage(t)
-	mustWriteCertificate(t, b, s, "keys/"+certificateTestKey, map[string]interface{}{"type": "ecdsa-sm2"})
+	mustWriteCertificate(t, b, s, "keys/"+certificateTestKey, map[string]interface{}{"type": "sm2"})
 
 	resp := mustWriteCertificate(t, b, s, "keys/"+certificateTestKey+"/csr", map[string]interface{}{
 		"csr": newTestCsrTemplate(t, "svc.internal"),
@@ -224,7 +224,7 @@ func TestCreateCsrEndpoint(t *testing.T) {
 
 func TestCreateCsrEndpointWithoutTemplate(t *testing.T) {
 	b, s := createBackendWithStorage(t)
-	mustWriteCertificate(t, b, s, "keys/"+certificateTestKey, map[string]interface{}{"type": "ecdsa-sm2"})
+	mustWriteCertificate(t, b, s, "keys/"+certificateTestKey, map[string]interface{}{"type": "sm2"})
 
 	resp := mustWriteCertificate(t, b, s, "keys/"+certificateTestKey+"/csr", nil)
 
@@ -247,7 +247,7 @@ func TestCreateCsrEndpointWithoutTemplate(t *testing.T) {
 func TestCreateCsrEndpointErrors(t *testing.T) {
 	b, s := createBackendWithStorage(t)
 	mustWriteCertificate(t, b, s, "keys/sm4-key", nil)
-	mustWriteCertificate(t, b, s, "keys/"+certificateTestKey, map[string]interface{}{"type": "ecdsa-sm2"})
+	mustWriteCertificate(t, b, s, "keys/"+certificateTestKey, map[string]interface{}{"type": "sm2"})
 
 	cases := []struct {
 		name string
@@ -288,7 +288,7 @@ func TestCreateCsrEndpointErrors(t *testing.T) {
 
 func TestSetCertificateEndpoint(t *testing.T) {
 	b, s := createBackendWithStorage(t)
-	mustWriteCertificate(t, b, s, "keys/"+certificateTestKey, map[string]interface{}{"type": "ecdsa-sm2"})
+	mustWriteCertificate(t, b, s, "keys/"+certificateTestKey, map[string]interface{}{"type": "sm2"})
 
 	key := signerForVersion(t, certificatePolicy(t, b, s, certificateTestKey), 1)
 	ca, caDER := newTestCACertificate(t, key, "test-ca")
@@ -344,8 +344,8 @@ func TestSetCertificateEndpoint(t *testing.T) {
 
 func TestSetCertificateEndpointRejectsForeignKey(t *testing.T) {
 	b, s := createBackendWithStorage(t)
-	mustWriteCertificate(t, b, s, "keys/"+certificateTestKey, map[string]interface{}{"type": "ecdsa-sm2"})
-	mustWriteCertificate(t, b, s, "keys/other-key", map[string]interface{}{"type": "ecdsa-sm2"})
+	mustWriteCertificate(t, b, s, "keys/"+certificateTestKey, map[string]interface{}{"type": "sm2"})
+	mustWriteCertificate(t, b, s, "keys/other-key", map[string]interface{}{"type": "sm2"})
 
 	foreignKey := signerForVersion(t, certificatePolicy(t, b, s, "other-key"), 1)
 	ca, caDER := newTestCACertificate(t, foreignKey, "test-ca")
@@ -359,7 +359,7 @@ func TestSetCertificateEndpointRejectsForeignKey(t *testing.T) {
 
 func TestSetCertificateEndpointRejectsCAFirst(t *testing.T) {
 	b, s := createBackendWithStorage(t)
-	mustWriteCertificate(t, b, s, "keys/"+certificateTestKey, map[string]interface{}{"type": "ecdsa-sm2"})
+	mustWriteCertificate(t, b, s, "keys/"+certificateTestKey, map[string]interface{}{"type": "sm2"})
 
 	key := signerForVersion(t, certificatePolicy(t, b, s, certificateTestKey), 1)
 	ca, caDER := newTestCACertificate(t, key, "test-ca")
@@ -376,7 +376,7 @@ func TestSetCertificateEndpointRejectsCAFirst(t *testing.T) {
 func TestSetCertificateEndpointRejectsInvalidInput(t *testing.T) {
 	b, s := createBackendWithStorage(t)
 	mustWriteCertificate(t, b, s, "keys/sm4-key", nil)
-	mustWriteCertificate(t, b, s, "keys/"+certificateTestKey, map[string]interface{}{"type": "ecdsa-sm2"})
+	mustWriteCertificate(t, b, s, "keys/"+certificateTestKey, map[string]interface{}{"type": "sm2"})
 
 	cases := []struct {
 		name string

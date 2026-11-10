@@ -20,7 +20,7 @@ func TestCertificateWalkthrough(t *testing.T) {
 	b, s := createBackendWithStorage(t)
 	const key = "walkthrough"
 
-	mustWriteCertificate(t, b, s, "keys/"+key, map[string]interface{}{"type": "ecdsa-sm2"})
+	mustWriteCertificate(t, b, s, "keys/"+key, map[string]interface{}{"type": "sm2"})
 
 	csrResp := mustWriteCertificate(t, b, s, "keys/"+key+"/csr", map[string]interface{}{"version": 1})
 	csrPEM, _ := csrResp.Data["csr"].(string)

@@ -50,8 +50,9 @@ func (b *backend) pathKeys() *framework.Path {
 				Type:    framework.TypeString,
 				Default: "sm4-gcm96",
 				Description: `
-The type of key to create. Currently, "sm4-gcm96" (symmetric), "ecdsa-sm2"
-(asymmetric) are supported.  Defaults to "sm4-gcm96".
+The type of key to create. Currently, "sm4-gcm96" (symmetric),
+"sm2" (asymmetric) and "hmac" are supported.  Defaults to "sm4-gcm96".
+The older name "ecdsa-sm2" is still accepted for "sm2".
 `,
 			},
 
@@ -162,7 +163,7 @@ func (b *backend) pathPolicyWrite(ctx context.Context, req *logical.Request, d *
 	name := d.Get("name").(string)
 	derived := d.Get("derived").(bool)
 	convergent := d.Get("convergent_encryption").(bool)
-	keyType := d.Get("type").(string)
+	keyTypeRaw := d.Get("type").(string)
 	keySize := d.Get("key_size").(int)
 	exportable := d.Get("exportable").(bool)
 	allowPlaintextBackup := d.Get("allow_plaintext_backup").(bool)
@@ -188,20 +189,11 @@ func (b *backend) pathPolicyWrite(ctx context.Context, req *logical.Request, d *
 		AllowPlaintextBackup: allowPlaintextBackup,
 		AutoRotatePeriod:     autoRotatePeriod,
 	}
-	switch keyType {
-	case "sm4-gcm96":
-		polReq.KeyType = KeyType_SM4_GCM96
-	case "ecdsa-sm2":
-		polReq.KeyType = KeyType_ECDSA_SM2
-	case "hmac":
-		polReq.KeyType = KeyType_HMAC
-	case "managed_key":
-		polReq.KeyType = KeyType_MANAGED_KEY
-	case "sm4-cmac":
-		polReq.KeyType = KeyType_SM4_CMAC
-	default:
-		return logical.ErrorResponse(fmt.Sprintf("unknown key type %v", keyType)), logical.ErrInvalidRequest
+	kt, ok := keyTypeFromString(keyTypeRaw)
+	if !ok {
+		return logical.ErrorResponse(fmt.Sprintf("unknown key type %v", keyTypeRaw)), logical.ErrInvalidRequest
 	}
+	polReq.KeyType = kt
 	if keySize != 0 {
 		if polReq.KeyType != KeyType_HMAC {
 			return logical.ErrorResponse(fmt.Sprintf("key_size is not valid for algorithm %v", polReq.KeyType)), logical.ErrInvalidRequest

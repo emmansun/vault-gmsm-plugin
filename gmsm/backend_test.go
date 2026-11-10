@@ -112,7 +112,7 @@ func Test_SM2(t *testing.T) {
 		Path:      "keys/sm2",
 		Operation: logical.UpdateOperation,
 		Data: map[string]interface{}{
-			"type": "ecdsa-sm2",
+			"type": "sm2",
 		},
 		Storage: storage,
 	}

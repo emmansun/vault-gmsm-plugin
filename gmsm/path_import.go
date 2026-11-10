@@ -18,21 +18,19 @@ import (
 // of falling into the generic "unknown key type" answer.
 func importableKeyType(raw string) (KeyType, error) {
 	switch raw {
-	case "ecdsa-sm2":
-		return KeyType_ECDSA_SM2, nil
-	case "sm4-gcm96":
-		return KeyType_SM4_GCM96, nil
-	case "hmac":
-		return KeyType_HMAC, nil
+	case "":
+		return 0, fmt.Errorf("type is required when importing key material")
 	case "sm4-cmac":
 		return 0, ErrCmacUnsupported
 	case "managed_key":
 		return 0, fmt.Errorf("managed keys are not imported, they are configured with managed_key_name or managed_key_id")
-	case "":
-		return 0, fmt.Errorf("type is required when importing key material")
 	}
 
-	return 0, fmt.Errorf("unknown key type %v", raw)
+	keyType, ok := keyTypeFromString(raw)
+	if !ok {
+		return 0, fmt.Errorf("unknown key type %v", raw)
+	}
+	return keyType, nil
 }
 
 // importMaterial turns the three material fields into what the policy layer
@@ -82,7 +80,7 @@ func importMaterial(d *framework.FieldData, keyType KeyType) ([]byte, bool, erro
 	}
 
 	if privateKeyPEM != "" || publicKeyPEM != "" {
-		return nil, false, fmt.Errorf("private_key and public_key are only used for ecdsa-sm2; supply key for %s", keyType)
+		return nil, false, fmt.Errorf("private_key and public_key are only used for sm2; supply key for %s", keyType)
 	}
 
 	raw, err := base64.StdEncoding.DecodeString(symmetricKey)
@@ -113,8 +111,9 @@ func (b *backend) pathImportKey() *framework.Path {
 
 			"type": {
 				Type: framework.TypeString,
-				Description: `The type of key to import. Currently "ecdsa-sm2",
-"sm4-gcm96" and "hmac" are supported.`,
+				Description: `The type of key to import. Currently "sm2",
+"sm4-gcm96" and "hmac" are supported. The older name "ecdsa-sm2"
+is still accepted for "sm2".`,
 			},
 
 			"private_key": {
@@ -359,7 +358,7 @@ This path creates a key from key material that was generated elsewhere. The
 material is supplied in the request, so it has to travel over TLS to the
 server; transit's wrapping key exchange and byok-export are not implemented.
 
-For ecdsa-sm2 the public half may be imported on its own, which leaves the key
+For sm2 the public half may be imported on its own, which leaves the key
 usable for verification and encryption only.
 `
 

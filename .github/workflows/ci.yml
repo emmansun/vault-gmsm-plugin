@@ -112,8 +112,8 @@ jobs:
         [[ $rewrapped == vault:v2:* ]]
         [ "$(vault write -field=plaintext gmsm/decrypt/mykey ciphertext="$rewrapped")" = "$plaintext" ]
 
-        # ecdsa-sm2: encrypt, decrypt, read the key, sign and verify.
-        vault write -f gmsm/keys/sm2-key type=ecdsa-sm2
+        # sm2: encrypt, decrypt, read the key, sign and verify.
+        vault write -f gmsm/keys/sm2-key type=sm2
         sm2_ciphertext=$(vault write -field=ciphertext gmsm/encrypt/sm2-key plaintext="$plaintext")
         [[ $sm2_ciphertext == vault:v1:* ]]
         [ "$(vault write -field=plaintext gmsm/decrypt/sm2-key ciphertext="$sm2_ciphertext")" = "$plaintext" ]
@@ -170,7 +170,7 @@ jobs:
 
         # A chain that belongs to another key must be refused, otherwise the
         # export would attest a key the plugin does not hold.
-        vault write gmsm/keys/foreign-key type=ecdsa-sm2 > /dev/null
+        vault write gmsm/keys/foreign-key type=sm2 > /dev/null
         vault write -field=csr gmsm/keys/foreign-key/csr version=1 > "$RUNNER_TEMP/foreign.pem"
         go run ./scripts/ci/sm2ca -csr "$RUNNER_TEMP/foreign.pem" -out "$RUNNER_TEMP/foreign-chain.pem" > /dev/null \
           || fail "the test CA could not sign the foreign request"
@@ -230,7 +230,7 @@ jobs:
         plaintext=$(printf 'my secret data' | base64)
 
         # Material can only be exported when the key was created exportable.
-        vault write -f gmsm/keys/exportable-key type=ecdsa-sm2 exportable=true > /dev/null
+        vault write -f gmsm/keys/exportable-key type=sm2 exportable=true > /dev/null
         signature=$(vault write -field=signature gmsm/sign/exportable-key input="$plaintext")
 
         vault read -format=json gmsm/export/signing-key/exportable-key/latest \
@@ -239,10 +239,15 @@ jobs:
           || fail "export did not return an SEC 1 private key: $(cat "$RUNNER_TEMP/signing-key.pem")"
 
         # What export produces has to go straight back into import.
-        vault write gmsm/keys/imported-key type=ecdsa-sm2 \
+        vault write gmsm/keys/imported-key type=sm2 \
           private_key=@"$RUNNER_TEMP/signing-key.pem" > /dev/null
         expect "an imported key reports itself as imported" true \
           "$(vault read -field=imported_key gmsm/keys/imported-key)"
+
+        # The type was renamed from ecdsa-sm2, which still has to be accepted.
+        vault write -f gmsm/keys/legacy-name-key type=ecdsa-sm2 > /dev/null
+        expect "the old type name is accepted and reported as sm2" sm2 \
+          "$(vault read -field=type gmsm/keys/legacy-name-key)"
 
         # A re-import is the same key, so signatures cross over both ways.
         expect "a signature of the original verifies against the copy" true \
@@ -252,7 +257,7 @@ jobs:
           "$(vault write -field=valid gmsm/verify/exportable-key input="$plaintext" signature="$copied")"
 
         # import creates, it does not extend an existing key.
-        if duplicate=$(vault write gmsm/keys/imported-key type=ecdsa-sm2 \
+        if duplicate=$(vault write gmsm/keys/imported-key type=sm2 \
             private_key=@"$RUNNER_TEMP/signing-key.pem" 2>&1); then
           fail "a second import of the same name was accepted"
         fi
@@ -275,7 +280,7 @@ jobs:
         # make them.
         vault read -format=json gmsm/export/public-key/exportable-key/latest \
           | jq -r '.data.keys["1"]' > "$RUNNER_TEMP/public-key.pem"
-        vault write gmsm/keys/public-only-key type=ecdsa-sm2 \
+        vault write gmsm/keys/public-only-key type=sm2 \
           public_key=@"$RUNNER_TEMP/public-key.pem" > /dev/null
         expect "a public-only import verifies a signature made elsewhere" true \
           "$(vault write -field=valid gmsm/verify/public-only-key input="$plaintext" signature="$signature")"
@@ -298,7 +303,7 @@ jobs:
 
         # Once rotation is allowed and used, the ring holds a generated version
         # and import_version has to refuse further material.
-        vault write gmsm/keys/rotatable-key type=ecdsa-sm2 \
+        vault write gmsm/keys/rotatable-key type=sm2 \
           private_key=@"$RUNNER_TEMP/signing-key.pem" allow_rotation=true > /dev/null
         vault write -f gmsm/keys/rotatable-key/rotate > /dev/null
         if spliced=$(vault write gmsm/keys/rotatable-key/import_version \

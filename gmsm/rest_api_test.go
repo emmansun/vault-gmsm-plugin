@@ -128,9 +128,9 @@ func TestRESTAPI(t *testing.T) {
 	input := base64.StdEncoding.EncodeToString([]byte("the quick brown fox"))
 	otherInput := base64.StdEncoding.EncodeToString([]byte("a different input"))
 
-	status, body := c.call(http.MethodPost, "keys/"+keyName, map[string]any{"type": "ecdsa-sm2"})
+	status, body := c.call(http.MethodPost, "keys/"+keyName, map[string]any{"type": "sm2"})
 	wantStatus(t, status, http.StatusOK, "create a signing key")
-	wantString(t, body, "ecdsa-sm2", "data", "type")
+	wantString(t, body, "sm2", "data", "type")
 	wantNumber(t, body, 1, "data", "latest_version")
 
 	// Both signatures are taken once and reused by the verification subtests.
@@ -155,7 +155,7 @@ func TestRESTAPI(t *testing.T) {
 		status, body := c.call(http.MethodGet, "keys/"+keyName, nil)
 		wantStatus(t, status, http.StatusOK, "read the key")
 		wantString(t, body, keyName, "data", "name")
-		wantString(t, body, "ecdsa-sm2", "data", "type")
+		wantString(t, body, "sm2", "data", "type")
 		if !strings.Contains(digString(t, body, "data", "keys", "1", "public_key"), "BEGIN PUBLIC KEY") {
 			t.Fatal("the key metadata does not carry the public key in PEM form")
 		}
@@ -242,7 +242,7 @@ func TestRESTAPI(t *testing.T) {
 		})
 		wantStatus(t, status, http.StatusOK, "generate a certificate request")
 		wantString(t, body, keyName, "data", "name")
-		wantString(t, body, "ecdsa-sm2", "data", "type")
+		wantString(t, body, "sm2", "data", "type")
 		wantNumber(t, body, 1, "data", "key_version")
 
 		csrPEM := digString(t, body, "data", "csr")

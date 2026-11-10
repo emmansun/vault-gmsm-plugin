@@ -27,7 +27,7 @@ mount path changed.
   - [Quick start](#quick-start)
   - [Key types](#key-types)
     - [`sm4-gcm96`](#sm4-gcm96)
-    - [`ecdsa-sm2`](#ecdsa-sm2)
+    - [`sm2`](#sm2)
   - [Endpoint reference](#endpoint-reference)
     - [Creating keys](#creating-keys)
     - [Key configuration](#key-configuration)
@@ -48,11 +48,13 @@ mount path changed.
 | Key type | Operations |
 | --- | --- |
 | `sm4-gcm96` (default) | Encrypt, decrypt, rewrap, data keys, key derivation, convergent encryption, associated data |
-| `ecdsa-sm2` | Encrypt, decrypt, rewrap, data keys, sign, verify, certificate requests |
+| `sm2` | Encrypt, decrypt, rewrap, data keys, sign, verify, certificate requests |
 | `hmac` | HMAC-SM3 only, with a key size between 32 and 512 bytes |
 
 HMAC-SM3 is available on every key version regardless of type, so an
-`ecdsa-sm2` key can also produce and verify HMACs.
+`sm2` key can also produce and verify HMACs. The older type name `ecdsa-sm2` is
+still accepted on every path that takes a type, and a key created with it reports
+`sm2`.
 
 All three types also accept imported key material; see
 [Importing keys](#importing-keys).
@@ -173,7 +175,7 @@ request unless the caller supplies one.
 `convergent_encryption=true` without `derived=true` is rejected at creation, and
 so is an encryption request that omits the context or nonce of a convergent key.
 
-### `ecdsa-sm2`
+### `sm2`
 
 SM2 on the `sm2p256v1` curve. The same key can encrypt (SM2 public key
 encryption), sign, and carry a certificate chain.
@@ -225,14 +227,14 @@ All paths are relative to the mount, `gmsm` in the examples.
 ### Creating keys
 
 ```bash
-vault write gmsm/keys/app-key type=ecdsa-sm2
+vault write gmsm/keys/app-key type=sm2
 vault write gmsm/keys/session-key derived=true convergent_encryption=true exportable=true
 vault write gmsm/keys/mac-key type=hmac key_size=64
 ```
 
 | Field | Applies to | Notes |
 | --- | --- | --- |
-| `type` | all | `sm4-gcm96` (default), `ecdsa-sm2`, `hmac` |
+| `type` | all | `sm4-gcm96` (default), `sm2`, `hmac` |
 | `derived` | `sm4-gcm96` | Enables per-request key derivation |
 | `convergent_encryption` | `sm4-gcm96` | Requires `derived` |
 | `exportable` | all | Allows the private material to be exported |
@@ -261,7 +263,7 @@ supports_decryption       true
 supports_derivation       false
 supports_encryption       true
 supports_signing          true
-type                      ecdsa-sm2
+type                      sm2
 ```
 
 ### Key configuration
@@ -402,7 +404,7 @@ $ vault read gmsm/export/certificate-chain/app-key
 - The chain is stored per key version and handed back verbatim by
   `export/certificate-chain/:name`.
 
-Certificates require a key type that can sign, which today means `ecdsa-sm2`.
+Certificates require a key type that can sign, which today means `sm2`.
 
 ## Importing keys
 
@@ -412,15 +414,15 @@ imported. Both take the material in the request body, so the transport has to be
 trusted; transit's wrapping-key exchange and `byok-export` are not implemented.
 
 ```bash
-vault write gmsm/keys/imported type=ecdsa-sm2 private_key=@private.pem
+vault write gmsm/keys/imported type=sm2 private_key=@private.pem
 vault write gmsm/keys/imported/import_version private_key=@next.pem
 ```
 
 | Field | Path | Notes |
 | --- | --- | --- |
-| `type` | `import` | `ecdsa-sm2`, `sm4-gcm96` or `hmac`. Required |
-| `private_key` | both | `ecdsa-sm2` only. PEM, either PKCS#8 (`BEGIN PRIVATE KEY`) or SEC 1 (`BEGIN EC PRIVATE KEY`) |
-| `public_key` | both | `ecdsa-sm2` only. PEM SPKI (`BEGIN PUBLIC KEY`) |
+| `type` | `import` | `sm2`, `sm4-gcm96` or `hmac`. Required |
+| `private_key` | both | `sm2` only. PEM, either PKCS#8 (`BEGIN PRIVATE KEY`) or SEC 1 (`BEGIN EC PRIVATE KEY`) |
+| `public_key` | both | `sm2` only. PEM SPKI (`BEGIN PUBLIC KEY`) |
 | `key` | both | `sm4-gcm96` and `hmac` only. Base64, 16 bytes for SM4 and 32–512 for HMAC |
 | `exportable` | `import` | Allows the material to be exported again |
 | `allow_plaintext_backup` | `import` | Allows a plaintext backup |

@@ -139,7 +139,7 @@ func (kt KeyType) String() string {
 	case KeyType_SM4_GCM96:
 		return "sm4-gcm96"
 	case KeyType_ECDSA_SM2:
-		return "ecdsa-sm2"
+		return "sm2"
 	case KeyType_HMAC:
 		return "hmac"
 	case KeyType_MANAGED_KEY:
@@ -148,6 +148,26 @@ func (kt KeyType) String() string {
 		return "sm4-cmac"
 	}
 	return "[unknown]"
+}
+
+// keyTypeFromString maps the type names accepted on the write paths onto a key
+// type. "ecdsa-sm2" is the name the type carried before it was recognised that
+// an SM2 key both signs and encrypts; it stays accepted as an alias so the
+// scripts and documents written against earlier releases keep working.
+func keyTypeFromString(raw string) (KeyType, bool) {
+	switch raw {
+	case "sm4-gcm96":
+		return KeyType_SM4_GCM96, true
+	case "sm2", "ecdsa-sm2":
+		return KeyType_ECDSA_SM2, true
+	case "hmac":
+		return KeyType_HMAC, true
+	case "managed_key":
+		return KeyType_MANAGED_KEY, true
+	case "sm4-cmac":
+		return KeyType_SM4_CMAC, true
+	}
+	return 0, false
 }
 
 type KeyData struct {

@@ -11,8 +11,8 @@ import (
 
 func TestTransit_Export_KeyVersion_ExportsCorrectVersion(t *testing.T) {
 	verifyExportsCorrectVersion(t, "encryption-key", "sm4-gcm96")
-	verifyExportsCorrectVersion(t, "encryption-key", "ecdsa-sm2")
-	verifyExportsCorrectVersion(t, "signing-key", "ecdsa-sm2")
+	verifyExportsCorrectVersion(t, "encryption-key", "sm2")
+	verifyExportsCorrectVersion(t, "signing-key", "sm2")
 }
 
 func verifyExportsCorrectVersion(t *testing.T, exportType, keyType string) {

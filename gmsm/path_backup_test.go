@@ -10,10 +10,10 @@ import (
 func TestTransit_BackupRestore(t *testing.T) {
 	// Test encryption/decryption after a restore for supported keys
 	testBackupRestore(t, "sm4-gcm96", "encrypt-decrypt")
-	testBackupRestore(t, "ecdsa-sm2", "encrypt-decrypt")
+	testBackupRestore(t, "sm2", "encrypt-decrypt")
 
 	// Test signing/verification after a restore for supported keys
-	testBackupRestore(t, "ecdsa-sm2", "sign-verify")
+	testBackupRestore(t, "sm2", "sign-verify")
 }
 
 func testBackupRestore(t *testing.T, keyType, feature string) {

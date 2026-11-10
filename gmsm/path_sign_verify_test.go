@@ -29,7 +29,7 @@ func TestTransit_SignVerify(t *testing.T) {
 		Operation: logical.UpdateOperation,
 		Path:      "keys/foo",
 		Data: map[string]interface{}{
-			"type": "ecdsa-sm2",
+			"type": "sm2",
 		},
 	}
 	_, err := b.HandleRequest(context.Background(), req)
@@ -182,7 +182,7 @@ func newSignVerifyUIDHelper(t *testing.T) *signVerifyUIDHelper {
 		Storage:   storage,
 		Operation: logical.UpdateOperation,
 		Path:      "keys/" + h.key,
-		Data:      map[string]interface{}{"type": "ecdsa-sm2"},
+		Data:      map[string]interface{}{"type": "sm2"},
 	}); err != nil {
 		t.Fatal(err)
 	}

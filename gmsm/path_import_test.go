@@ -155,13 +155,13 @@ func TestImportSM2PrivateKey(t *testing.T) {
 			}
 
 			resp := importOK(t, b, storage, importPath("imported"), map[string]interface{}{
-				"type":        "ecdsa-sm2",
+				"type":        "sm2",
 				"private_key": material,
 				"exportable":  true,
 			})
 
-			if got := resp.Data["type"]; got != "ecdsa-sm2" {
-				t.Fatalf("expected the imported key to be ecdsa-sm2, got %v", got)
+			if got := resp.Data["type"]; got != "sm2" {
+				t.Fatalf("expected the imported key to be sm2, got %v", got)
 			}
 			if got := resp.Data["imported_key"]; got != true {
 				t.Fatalf("expected the key to report itself as imported, got %v", got)
@@ -199,7 +199,7 @@ func TestImportSM2PublicKeyOnly(t *testing.T) {
 	priv, _, _ := newImportTestKey(t)
 
 	importOK(t, b, storage, importPath("public-only"), map[string]interface{}{
-		"type":       "ecdsa-sm2",
+		"type":       "sm2",
 		"public_key": publicKeyPEM(t, priv),
 	})
 
@@ -247,21 +247,21 @@ func TestImportRejectsExistingKey(t *testing.T) {
 	_, pkcs8, _ := newImportTestKey(t)
 
 	importOK(t, b, storage, importPath("imported"), map[string]interface{}{
-		"type":        "ecdsa-sm2",
+		"type":        "sm2",
 		"private_key": pkcs8,
 	})
 
 	importExpectErr(t, b, storage, importPath("imported"), map[string]interface{}{
-		"type":        "ecdsa-sm2",
+		"type":        "sm2",
 		"private_key": pkcs8,
 	}, "already exists")
 
 	// A key made by Vault is equally off limits.
 	importOK(t, b, storage, "keys/generated", map[string]interface{}{
-		"type": "ecdsa-sm2",
+		"type": "sm2",
 	})
 	importExpectErr(t, b, storage, importPath("generated"), map[string]interface{}{
-		"type":        "ecdsa-sm2",
+		"type":        "sm2",
 		"private_key": pkcs8,
 	}, "already exists")
 }
@@ -273,7 +273,7 @@ func TestImportVersionAppendsVersion(t *testing.T) {
 	_, second, _ := newImportTestKey(t)
 
 	importOK(t, b, storage, importPath("imported"), map[string]interface{}{
-		"type":        "ecdsa-sm2",
+		"type":        "sm2",
 		"private_key": first,
 	})
 	firstSignature := importSign(t, b, storage, "imported", "message")
@@ -306,7 +306,7 @@ func TestImportVersionRejectsVaultGeneratedKey(t *testing.T) {
 	_, pkcs8, _ := newImportTestKey(t)
 
 	importOK(t, b, storage, "keys/generated", map[string]interface{}{
-		"type": "ecdsa-sm2",
+		"type": "sm2",
 	})
 
 	importExpectErr(t, b, storage, importVersionPath("generated"), map[string]interface{}{
@@ -325,13 +325,13 @@ func TestImportVersionStopsAfterRotation(t *testing.T) {
 
 	// Rotation of an imported key is refused unless the import allowed it.
 	importOK(t, b, storage, importPath("fixed"), map[string]interface{}{
-		"type":        "ecdsa-sm2",
+		"type":        "sm2",
 		"private_key": first,
 	})
 	importExpectErr(t, b, storage, "keys/fixed/rotate", nil, "rotation is not allowed")
 
 	importOK(t, b, storage, importPath("rotating"), map[string]interface{}{
-		"type":           "ecdsa-sm2",
+		"type":           "sm2",
 		"private_key":    first,
 		"allow_rotation": true,
 	})
@@ -352,7 +352,7 @@ func TestImportVersionCompletesPublicOnlyVersion(t *testing.T) {
 	priv, pkcs8, _ := newImportTestKey(t)
 
 	importOK(t, b, storage, importPath("late-private"), map[string]interface{}{
-		"type":       "ecdsa-sm2",
+		"type":       "sm2",
 		"public_key": publicKeyPEM(t, priv),
 	})
 	importExpectErr(t, b, storage, "sign/late-private", map[string]interface{}{
@@ -404,13 +404,13 @@ func TestImportAutoRotationNeedsAllowRotation(t *testing.T) {
 	// A period without allow_rotation would describe a rotation that can never
 	// happen, so the import refuses it.
 	importExpectErr(t, b, storage, importPath("fixed"), map[string]interface{}{
-		"type":               "ecdsa-sm2",
+		"type":               "sm2",
 		"private_key":        pkcs8,
 		"auto_rotate_period": 3600,
 	}, "requires allow_rotation")
 
 	importOK(t, b, storage, importPath("fixed"), map[string]interface{}{
-		"type":        "ecdsa-sm2",
+		"type":        "sm2",
 		"private_key": pkcs8,
 	})
 	importExpectErr(t, b, storage, "keys/fixed/config", map[string]interface{}{
@@ -419,7 +419,7 @@ func TestImportAutoRotationNeedsAllowRotation(t *testing.T) {
 
 	// Once rotation is allowed, the period is usable and config can change it.
 	importOK(t, b, storage, importPath("rotating"), map[string]interface{}{
-		"type":               "ecdsa-sm2",
+		"type":               "sm2",
 		"private_key":        pkcs8,
 		"allow_rotation":     true,
 		"auto_rotate_period": 3600,
@@ -507,12 +507,12 @@ func TestImportRejectsInvalidRequests(t *testing.T) {
 	}{
 		{
 			name: "no material",
-			data: map[string]interface{}{"type": "ecdsa-sm2"},
+			data: map[string]interface{}{"type": "sm2"},
 			want: "one of private_key, public_key or key is required",
 		},
 		{
 			name: "two kinds of material",
-			data: map[string]interface{}{"type": "ecdsa-sm2", "private_key": pkcs8, "public_key": "x"},
+			data: map[string]interface{}{"type": "sm2", "private_key": pkcs8, "public_key": "x"},
 			want: "only one of",
 		},
 		{
@@ -537,13 +537,13 @@ func TestImportRejectsInvalidRequests(t *testing.T) {
 		},
 		{
 			name: "symmetric material for sm2",
-			data: map[string]interface{}{"type": "ecdsa-sm2", "key": wrongLength},
+			data: map[string]interface{}{"type": "sm2", "key": wrongLength},
 			want: "only used for sm4-gcm96 and hmac",
 		},
 		{
 			name: "private key for a symmetric type",
 			data: map[string]interface{}{"type": "sm4-gcm96", "private_key": pkcs8},
-			want: "only used for ecdsa-sm2",
+			want: "only used for sm2",
 		},
 		{
 			name: "material that is not base64",
@@ -557,27 +557,27 @@ func TestImportRejectsInvalidRequests(t *testing.T) {
 		},
 		{
 			name: "public key that is not PEM",
-			data: map[string]interface{}{"type": "ecdsa-sm2", "public_key": "not a pem"},
+			data: map[string]interface{}{"type": "sm2", "public_key": "not a pem"},
 			want: "must be a PEM encoded public key",
 		},
 		{
 			name: "private key that is not PEM",
-			data: map[string]interface{}{"type": "ecdsa-sm2", "private_key": "not a pem"},
+			data: map[string]interface{}{"type": "sm2", "private_key": "not a pem"},
 			want: "error parsing private key",
 		},
 		{
 			name: "private key on another curve",
-			data: map[string]interface{}{"type": "ecdsa-sm2", "private_key": p256PEM},
+			data: map[string]interface{}{"type": "sm2", "private_key": p256PEM},
 			want: "error parsing private key",
 		},
 		{
 			name: "auto rotate without allow_rotation",
-			data: map[string]interface{}{"type": "ecdsa-sm2", "private_key": pkcs8, "auto_rotate_period": 3600},
+			data: map[string]interface{}{"type": "sm2", "private_key": pkcs8, "auto_rotate_period": 3600},
 			want: "requires allow_rotation",
 		},
 		{
 			name: "auto rotate below an hour",
-			data: map[string]interface{}{"type": "ecdsa-sm2", "private_key": pkcs8, "allow_rotation": true, "auto_rotate_period": 60},
+			data: map[string]interface{}{"type": "sm2", "private_key": pkcs8, "allow_rotation": true, "auto_rotate_period": 60},
 			want: "at least an hour",
 		},
 	}
@@ -601,7 +601,7 @@ func TestExportImportRoundTrip(t *testing.T) {
 	b, storage := createBackendWithStorage(t)
 
 	importOK(t, b, storage, "keys/original", map[string]interface{}{
-		"type":       "ecdsa-sm2",
+		"type":       "sm2",
 		"exportable": true,
 	})
 	importSign(t, b, storage, "original", "message")
@@ -615,7 +615,7 @@ func TestExportImportRoundTrip(t *testing.T) {
 
 	// What export hands out has to be accepted by import unchanged.
 	importOK(t, b, storage, importPath("copy"), map[string]interface{}{
-		"type":        "ecdsa-sm2",
+		"type":        "sm2",
 		"private_key": exportedKey,
 	})
 
