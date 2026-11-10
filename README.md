@@ -414,7 +414,7 @@ imported. Both take the material in the request body, so the transport has to be
 trusted; transit's wrapping-key exchange and `byok-export` are not implemented.
 
 ```bash
-vault write gmsm/keys/imported type=sm2 private_key=@private.pem
+vault write gmsm/keys/imported/import type=sm2 private_key=@private.pem
 vault write gmsm/keys/imported/import_version private_key=@next.pem
 ```
 

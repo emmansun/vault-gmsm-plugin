@@ -238,9 +238,20 @@ jobs:
         grep -q 'BEGIN EC PRIVATE KEY' "$RUNNER_TEMP/signing-key.pem" \
           || fail "export did not return an SEC 1 private key: $(cat "$RUNNER_TEMP/signing-key.pem")"
 
+        # An import that misses a field only warns: the create path upserts and the
+        # walkthrough would go on to test a generated key. Keeping the output turns
+        # that into a failure at the line that caused it.
+        import_write() {
+          local out
+          out=$(vault write -f "$@" 2>&1) || fail "an import was refused: $out"
+          case $out in
+            *unrecognized*) fail "an import endpoint ignored a parameter: $out" ;;
+          esac
+        }
+
         # What export produces has to go straight back into import.
-        vault write gmsm/keys/imported-key type=sm2 \
-          private_key=@"$RUNNER_TEMP/signing-key.pem" > /dev/null
+        import_write gmsm/keys/imported-key/import type=sm2 \
+          private_key=@"$RUNNER_TEMP/signing-key.pem"
         expect "an imported key reports itself as imported" true \
           "$(vault read -field=imported_key gmsm/keys/imported-key)"
 
@@ -257,7 +268,7 @@ jobs:
           "$(vault write -field=valid gmsm/verify/exportable-key input="$plaintext" signature="$copied")"
 
         # import creates, it does not extend an existing key.
-        if duplicate=$(vault write gmsm/keys/imported-key type=sm2 \
+        if duplicate=$(vault write gmsm/keys/imported-key/import type=sm2 \
             private_key=@"$RUNNER_TEMP/signing-key.pem" 2>&1); then
           fail "a second import of the same name was accepted"
         fi
@@ -280,8 +291,8 @@ jobs:
         # make them.
         vault read -format=json gmsm/export/public-key/exportable-key/latest \
           | jq -r '.data.keys["1"]' > "$RUNNER_TEMP/public-key.pem"
-        vault write gmsm/keys/public-only-key type=sm2 \
-          public_key=@"$RUNNER_TEMP/public-key.pem" > /dev/null
+        import_write gmsm/keys/public-only-key/import type=sm2 \
+          public_key=@"$RUNNER_TEMP/public-key.pem"
         expect "a public-only import verifies a signature made elsewhere" true \
           "$(vault write -field=valid gmsm/verify/public-only-key input="$plaintext" signature="$signature")"
         if signed=$(vault write gmsm/sign/public-only-key input="$plaintext" 2>&1); then
@@ -303,8 +314,8 @@ jobs:
 
         # Once rotation is allowed and used, the ring holds a generated version
         # and import_version has to refuse further material.
-        vault write gmsm/keys/rotatable-key type=sm2 \
-          private_key=@"$RUNNER_TEMP/signing-key.pem" allow_rotation=true > /dev/null
+        import_write gmsm/keys/rotatable-key/import type=sm2 \
+          private_key=@"$RUNNER_TEMP/signing-key.pem" allow_rotation=true
         vault write -f gmsm/keys/rotatable-key/rotate > /dev/null
         if spliced=$(vault write gmsm/keys/rotatable-key/import_version \
             private_key=@"$RUNNER_TEMP/signing-key.pem" 2>&1); then
