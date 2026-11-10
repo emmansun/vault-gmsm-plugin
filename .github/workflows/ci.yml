@@ -25,25 +25,30 @@ jobs:
     - name: Test
       run: go test -v ./...
 
-  # Replays the manual walkthrough documented in README.md against a real Vault
-  # dev server, so the plugin is proven to load and serve requests over the
-  # plugin RPC protocol instead of only being exercised in-process by unit tests.
+  # Replays the manual walkthrough documented in README.md, plus the endpoints
+  # added on top of it, against a real Vault dev server. The plugin is proven to
+  # load and serve requests over the plugin RPC protocol instead of only being
+  # exercised in-process by unit tests.
+  #
+  # The same job runs the REST API test, because that one needs exactly the same
+  # dev server with the plugin already mounted.
   integration:
-    name: Integration Test (README walkthrough)
+    name: Integration Test
     runs-on: ubuntu-latest
     needs: build
     env:
       VAULT_VERSION: "2.1.1"
       VAULT_ADDR: http://127.0.0.1:8200
       VAULT_TOKEN: root
+      GMSM_MOUNT: gmsm
     steps:
     - name: Checkout Repo
-      uses: actions/checkout@v7
+      uses: actions/checkout@v5
 
     - name: Set up Go
-      uses: actions/setup-go@v7
+      uses: actions/setup-go@v6
       with:
-        go-version: '1.27'
+        go-version: '1.26'
 
     - name: Build plugin
       run: |
@@ -119,6 +124,64 @@ jobs:
         # The same signature must not verify a different input.
         tampered=$(printf 'tampered data' | base64)
         [ "$(vault write -field=valid gmsm/verify/sm2-key input="$tampered" signature="$signature")" = "false" ]
+
+    # The endpoints added on top of the README walkthrough: the certificate pair
+    # and the SM2 user identifier.
+    - name: Run certificate and identifier walkthrough
+      run: |
+        set -euo pipefail
+        plaintext=$(printf 'my secret data' | base64)
+
+        # The plugin signs the request with the key it stores, an external CA
+        # signs that request, and the chain is stored back on the key version.
+        vault write -field=csr gmsm/keys/sm2-key/csr version=1 > "$RUNNER_TEMP/request.pem"
+        grep -q 'BEGIN CERTIFICATE REQUEST' "$RUNNER_TEMP/request.pem"
+
+        go run ./scripts/ci/sm2ca -csr "$RUNNER_TEMP/request.pem" -out "$RUNNER_TEMP/chain.pem"
+
+        vault write gmsm/keys/sm2-key/set-certificate version=1 \
+          certificate_chain="$(cat "$RUNNER_TEMP/chain.pem")"
+
+        # Both the leaf and the CA have to come back from the export, otherwise
+        # a client cannot build the chain it was handed.
+        vault read -format=json gmsm/export/certificate-chain/sm2-key > "$RUNNER_TEMP/export.json"
+        certificates=$(grep -o 'BEGIN CERTIFICATE' "$RUNNER_TEMP/export.json" | wc -l || true)
+        if [ "$certificates" != "2" ]; then
+          echo '::error::the exported chain does not hold both certificates'
+          cat "$RUNNER_TEMP/export.json"
+          exit 1
+        fi
+
+        # A chain that belongs to another key must be refused, otherwise the
+        # export would attest a key the plugin does not hold.
+        vault write gmsm/keys/foreign-key type=ecdsa-sm2 > /dev/null
+        vault write -field=csr gmsm/keys/foreign-key/csr > "$RUNNER_TEMP/foreign.pem"
+        go run ./scripts/ci/sm2ca -csr "$RUNNER_TEMP/foreign.pem" -out "$RUNNER_TEMP/foreign-chain.pem" > /dev/null
+        if vault write gmsm/keys/sm2-key/set-certificate version=1 \
+             certificate_chain="$(cat "$RUNNER_TEMP/foreign-chain.pem")" > /dev/null 2>&1; then
+          echo '::error::a certificate chain of another key was accepted'
+          exit 1
+        fi
+
+        # Only the key types that sign can carry a certificate, and mykey is
+        # sm4-gcm96 from the README walkthrough.
+        if vault write gmsm/keys/mykey/csr > /dev/null 2>&1; then
+          echo '::error::a symmetric key produced a certificate request'
+          exit 1
+        fi
+
+        # The identifier is part of the Z value the signature covers, so a
+        # signature only verifies with the identifier it was created with.
+        identified=$(vault write -field=signature gmsm/sign/sm2-key input="$plaintext" uid=alice@example.com)
+        [[ $identified == vault:v1:* ]]
+        [ "$(vault write -field=valid gmsm/verify/sm2-key input="$plaintext" signature="$identified" uid=alice@example.com)" = "true" ]
+        [ "$(vault write -field=valid gmsm/verify/sm2-key input="$plaintext" signature="$identified")" = "false" ]
+        [ "$(vault write -field=valid gmsm/verify/sm2-key input="$plaintext" signature="$identified" uid=bob@example.com)" = "false" ]
+
+    # The REST test speaks to the same server over HTTP, so it catches what the
+    # CLI hides: status codes, JSON key names and the shape of error responses.
+    - name: Run REST API integration test
+      run: go test -count=1 -run TestRESTAPI -v ./gmsm
 
     - name: Dump Vault server log
       if: always()
