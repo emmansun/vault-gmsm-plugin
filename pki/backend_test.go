@@ -1,6 +1,7 @@
 package pki
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/rand"
@@ -433,6 +434,18 @@ func TestRevokeAndCRL(t *testing.T) {
 	second := pemData(t, mustRead(t, b, storage, "crl").Data, "certificate")
 	if first != second {
 		t.Fatal("two reads of an unchanged list answered with different bytes")
+	}
+
+	// The list is a CRL, not a certificate: the block type says which, and the
+	// raw endpoint has to answer with the same text.
+	block, _ := pem.Decode([]byte(first))
+	if block == nil || block.Type != "X509 CRL" {
+		t.Fatalf("the list is labelled %v, want X509 CRL", block)
+	}
+	raw := mustRead(t, b, storage, "crl/pem")
+	body, ok := raw.Data[logical.HTTPRawBody].([]byte)
+	if !ok || !bytes.HasPrefix(body, []byte("-----BEGIN X509 CRL-----")) {
+		t.Fatalf("crl/pem answered with %q", raw.Data[logical.HTTPRawBody])
 	}
 
 	again := mustWrite(t, b, storage, "revoke", map[string]interface{}{

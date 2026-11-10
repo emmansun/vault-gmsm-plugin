@@ -146,6 +146,13 @@ func pemCertificate(der []byte) string {
 	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
 }
 
+// pemCRL renders a revocation list. The block type has to say CRL: a list
+// wrapped as CERTIFICATE parses as neither one nor the other, and a strict
+// reader rejects it before it gets to the signature.
+func pemCRL(der []byte) string {
+	return string(pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: der}))
+}
+
 func pemCertificates(der [][]byte) []string {
 	bundle := make([]string, len(der))
 	for i, cert := range der {

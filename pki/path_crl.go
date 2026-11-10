@@ -101,7 +101,7 @@ func (b *backend) pathCRLRead(ctx context.Context, req *logical.Request, _ *fram
 	}
 
 	return &logical.Response{Data: map[string]interface{}{
-		"certificate": pemCertificate(entry.DER),
+		"certificate": pemCRL(entry.DER),
 		"number":      entry.Number,
 		"this_update": entry.ThisUpdate.Unix(),
 		"next_update": entry.NextUpdate.Unix(),
@@ -116,7 +116,7 @@ func (b *backend) pathCRLPEMRead(ctx context.Context, req *logical.Request, _ *f
 
 	return &logical.Response{Data: map[string]interface{}{
 		logical.HTTPContentType: "application/pem-encoding",
-		logical.HTTPRawBody:     []byte(pemCertificate(entry.DER)),
+		logical.HTTPRawBody:     []byte(pemCRL(entry.DER)),
 		logical.HTTPStatusCode:  http.StatusOK,
 	}}, nil
 }
