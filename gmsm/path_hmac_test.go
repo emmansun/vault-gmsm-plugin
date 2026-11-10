@@ -2,6 +2,7 @@ package gmsm
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -356,5 +357,18 @@ func TestTransit_batchHMAC(t *testing.T) {
 
 	if batchHMACVerifyResponseItems[0].Valid {
 		t.Fatalf("expected error validating hmac\nreq\n%#v\nresp\n%#v", *req, *resp)
+	}
+}
+
+// A rejected HMAC must answer "valid": false. Dropping the field, which is what
+// omitempty did, makes a mismatch indistinguishable from a missing result.
+func TestBatchResponseHMACItemAlwaysReportsValid(t *testing.T) {
+	encoded, err := json.Marshal(batchResponseHMACItem{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.Contains(string(encoded), `"valid":false`) {
+		t.Fatalf("valid was omitted from the encoded item: %s", encoded)
 	}
 }

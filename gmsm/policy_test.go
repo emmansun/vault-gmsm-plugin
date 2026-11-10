@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"reflect"
@@ -800,7 +799,7 @@ func TestPolicy_CreateCsr(t *testing.T) {
 		t.Fatalf("error creating policy: %s", err)
 	}
 
-	template := &x509.CertificateRequest{
+	template := &smx509.CertificateRequest{
 		Subject:  pkix.Name{CommonName: "vault-gmsm-plugin", Organization: []string{"test"}},
 		DNSNames: []string{"gmsm.example.com"},
 	}

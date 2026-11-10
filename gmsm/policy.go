@@ -9,7 +9,6 @@ import (
 	"crypto/ecdsa"
 	"crypto/hmac"
 	"crypto/rand"
-	"crypto/x509"
 	"encoding/asn1"
 	"encoding/base64"
 	"encoding/json"
@@ -1846,7 +1845,10 @@ func parseFromKey(ke *keysutil.KeyEntry, PolKeyType KeyType, parsedKey any) erro
 	return nil
 }
 
-func (p *Policy) CreateCsr(keyVersion int, csrTemplate *x509.CertificateRequest) ([]byte, error) {
+// CreateCsr builds a PEM encoded certificate request for the given key version.
+// The template contributes the subject and the extensions only; the public key
+// and the signature always come from the key version itself.
+func (p *Policy) CreateCsr(keyVersion int, csrTemplate *smx509.CertificateRequest) ([]byte, error) {
 	if !p.Type.SigningSupported() {
 		return nil, errutil.UserError{Err: fmt.Sprintf("key type '%s' does not support signing", p.Type)}
 	}
@@ -1860,63 +1862,43 @@ func (p *Policy) CreateCsr(keyVersion int, csrTemplate *x509.CertificateRequest)
 		return nil, errutil.UserError{Err: "private key not imported for key version selected"}
 	}
 
-	csrTemplate.Signature = nil
-	csrTemplate.SignatureAlgorithm = x509.UnknownSignatureAlgorithm
-
-	var key crypto.Signer
+	var signer crypto.Signer
 	switch p.Type {
 	case KeyType_ECDSA_SM2:
-		if key, err = sm2.NewPrivateKeyFromInt(keyEntry.EC_D); err != nil {
+		if signer, err = sm2.NewPrivateKeyFromInt(keyEntry.EC_D); err != nil {
 			return nil, err
 		}
 
 	default:
 		return nil, errutil.InternalError{Err: fmt.Sprintf("selected key type '%s' does not support signing", p.Type.String())}
 	}
-	csrBytes, err := smx509.CreateCertificateRequest(rand.Reader, toSMX509CertificateRequest(csrTemplate), key)
+
+	// Work on a copy so the caller's template is left untouched, and let smx509
+	// choose the signature algorithm from the signing key.
+	template := *csrTemplate
+	template.Signature = nil
+	template.SignatureAlgorithm = smx509.UnknownSignatureAlgorithm
+
+	csrBytes, err := smx509.CreateCertificateRequest(rand.Reader, &template, signer)
 	if err != nil {
-		return nil, fmt.Errorf("could not create the cerfificate request: %w", err)
+		return nil, fmt.Errorf("could not create the certificate request: %w", err)
 	}
 
-	pemCsr := pem.EncodeToMemory(&pem.Block{
+	return pem.EncodeToMemory(&pem.Block{
 		Type:  "CERTIFICATE REQUEST",
 		Bytes: csrBytes,
-	})
-
-	return pemCsr, nil
+	}), nil
 }
 
-// toSMX509CertificateRequest maps a standard library certificate request template
-// onto the smx509 template type used by smx509.CreateCertificateRequest. Only the
-// fields consumed when building a CSR are copied; the signature algorithm is left
-// unset so smx509 picks SM2WithSM3 for SM2 keys.
-func toSMX509CertificateRequest(template *x509.CertificateRequest) *smx509.CertificateRequest {
-	return &smx509.CertificateRequest{
-		SignatureAlgorithm: smx509.UnknownSignatureAlgorithm,
-		Subject:            template.Subject,
-		DNSNames:           template.DNSNames,
-		EmailAddresses:     template.EmailAddresses,
-		IPAddresses:        template.IPAddresses,
-		URIs:               template.URIs,
-		Attributes:         template.Attributes,
-		Extensions:         template.Extensions,
-		ExtraExtensions:    template.ExtraExtensions,
-	}
-}
-
-func (p *Policy) ValidateLeafCertKeyMatch(keyVersion int, certPublicKeyAlgorithm x509.PublicKeyAlgorithm, certPublicKey any) (bool, error) {
+// ValidateLeafCertKeyMatch reports whether the public key of the leaf
+// certificate is the one stored in the given key version.
+func (p *Policy) ValidateLeafCertKeyMatch(keyVersion int, certPublicKeyAlgorithm smx509.PublicKeyAlgorithm, certPublicKey any) (bool, error) {
 	if !p.Type.SigningSupported() {
 		return false, errutil.UserError{Err: fmt.Sprintf("key type '%s' does not support signing", p.Type)}
 	}
 
-	var keyTypeMatches bool
-	switch p.Type {
-	case KeyType_ECDSA_SM2:
-		if certPublicKeyAlgorithm == x509.ECDSA {
-			keyTypeMatches = true
-		}
-	}
-	if !keyTypeMatches {
+	// smx509 reports both ECDSA and SM2 public keys as ECDSA.
+	if certPublicKeyAlgorithm != smx509.ECDSA {
 		return false, errutil.UserError{Err: fmt.Sprintf("provided leaf certificate public key algorithm '%s' does not match the gmsm transit key type '%s'",
 			certPublicKeyAlgorithm, p.Type)}
 	}
@@ -1926,26 +1908,24 @@ func (p *Policy) ValidateLeafCertKeyMatch(keyVersion int, certPublicKeyAlgorithm
 		return false, err
 	}
 
-	switch certPublicKeyAlgorithm {
-	case x509.ECDSA:
-		certPublicKey := certPublicKey.(*ecdsa.PublicKey)
-
-		publicKey := &ecdsa.PublicKey{
-			Curve: sm2.P256(),
-			X:     keyEntry.EC_X,
-			Y:     keyEntry.EC_Y,
-		}
-
-		return publicKey.Equal(certPublicKey), nil
-
-	case x509.UnknownPublicKeyAlgorithm:
-		return false, errutil.InternalError{Err: fmt.Sprint("certificate signed with an unknown algorithm")}
+	certKey, ok := certPublicKey.(*ecdsa.PublicKey)
+	if !ok {
+		return false, errutil.UserError{Err: fmt.Sprintf("provided leaf certificate public key type '%T' is not supported", certPublicKey)}
 	}
 
-	return false, nil
+	keyPublicKey := &ecdsa.PublicKey{
+		Curve: sm2.P256(),
+		X:     keyEntry.EC_X,
+		Y:     keyEntry.EC_Y,
+	}
+
+	return keyPublicKey.Equal(certKey), nil
 }
 
-func (p *Policy) ValidateAndPersistCertificateChain(ctx context.Context, keyVersion int, certChain []*x509.Certificate, storage logical.Storage) error {
+// ValidateAndPersistCertificateChain checks that the chain starts with a leaf
+// certificate belonging to the given key version and then stores it on that
+// version, so export and read-keys can hand it back out.
+func (p *Policy) ValidateAndPersistCertificateChain(ctx context.Context, keyVersion int, certChain []*smx509.Certificate, storage logical.Storage) error {
 	if len(certChain) == 0 {
 		return errutil.UserError{Err: "expected at least one certificate in the parsed certificate chain"}
 	}
@@ -1971,7 +1951,7 @@ func (p *Policy) ValidateAndPersistCertificateChain(ctx context.Context, keyVers
 		}
 	}
 	if !valid {
-		return fmt.Errorf("leaf certificate public key does match the key version selected")
+		return errutil.UserError{Err: "leaf certificate public key does not match the key version selected"}
 	}
 
 	keyEntry, err := p.safeGetKeyEntry(keyVersion)
@@ -1979,7 +1959,7 @@ func (p *Policy) ValidateAndPersistCertificateChain(ctx context.Context, keyVers
 		return err
 	}
 
-	// Convert the certificate chain to DER format
+	// Only the DER encoding is kept; the PEM wrapping is rebuilt on export.
 	derCertificates := make([][]byte, len(certChain))
 	for i, cert := range certChain {
 		derCertificates[i] = cert.Raw
@@ -1988,5 +1968,6 @@ func (p *Policy) ValidateAndPersistCertificateChain(ctx context.Context, keyVers
 	keyEntry.CertificateChain = derCertificates
 
 	p.Keys[strconv.Itoa(keyVersion)] = keyEntry
+
 	return p.Persist(ctx, storage)
 }

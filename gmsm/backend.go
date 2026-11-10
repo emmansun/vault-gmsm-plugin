@@ -68,6 +68,8 @@ func Backend(ctx context.Context, conf *logical.BackendConfig) (*backend, error)
 			// as the handler is greedy
 			b.pathRotate(),
 			b.pathRewrap(),
+			b.pathCreateCsr(),
+			b.pathSetCertificate(),
 			b.pathKeys(),
 			b.pathListKeys(),
 			b.pathExportKeys(),

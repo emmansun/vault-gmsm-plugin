@@ -23,8 +23,10 @@ type batchResponseHMACItem struct {
 	// HMAC for the input present in the corresponding batch request item
 	HMAC string `json:"hmac,omitempty" mapstructure:"hmac"`
 
-	// Valid indicates whether signature matches the signature derived from the input string
-	Valid bool `json:"valid,omitempty" mapstructure:"valid"`
+	// Valid indicates whether the HMAC matches the one derived from the input
+	// string. It is never omitted: a failed check must answer false, not
+	// disappear from the batch response.
+	Valid bool `json:"valid" mapstructure:"valid"`
 
 	// Error, if set represents a failure encountered while encrypting a
 	// corresponding batch request item

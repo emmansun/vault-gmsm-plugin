@@ -98,6 +98,14 @@ to the min_encryption_version configured on the key.`,
 				Description: `Set to 'true' when the input is already hashed. `,
 			},
 
+			"uid": {
+				Type: framework.TypeString,
+				Description: `The SM2 user identifier mixed into the Z value the signature
+covers. When omitted the standard identifier 1234567812345678 is used, so
+leaving it unset matches a plain SM2 implementation. Ignored when 'prehashed'
+is set, because the input is then signed without recomputing the Z value.`,
+			},
+
 			"marshaling_algorithm": {
 				Type:        framework.TypeString,
 				Default:     "asn1",
@@ -153,19 +161,16 @@ func (b *backend) pathVerify() *framework.Path {
 
 			"urlalgorithm": {
 				Type:        framework.TypeString,
-				Description: `Hash algorithm to use (POST URL parameter)`,
+				Description: `Hash algorithm to use when verifying an HMAC (POST URL parameter)`,
 			},
 
 			"hash_algorithm": {
 				Type:    framework.TypeString,
 				Default: defaultHashAlgorithm,
-				Description: `Hash algorithm to use (POST body parameter). Valid values are:
-
-* sm3
-* none
-
-Defaults to "sm3". Not valid for all key types. See note about
-none on signing path.`,
+				Description: `Hash algorithm to use when verifying an HMAC (POST body parameter).
+Only "sm3" is supported. Signature verification ignores this field: an SM2
+signature always covers an SM3 digest, and a caller that already hashed the
+data sets 'prehashed' instead.`,
 			},
 
 			"algorithm": {
@@ -177,6 +182,14 @@ none on signing path.`,
 			"prehashed": {
 				Type:        framework.TypeBool,
 				Description: `Set to 'true' when the input is already hashed. `,
+			},
+
+			"uid": {
+				Type: framework.TypeString,
+				Description: `The SM2 user identifier mixed into the Z value the signature
+covers. Must match the one used to create the signature; when omitted the
+standard identifier 1234567812345678 is assumed. Ignored when 'prehashed' is
+set.`,
 			},
 
 			"marshaling_algorithm": {
@@ -214,6 +227,10 @@ func (b *backend) pathSignWrite(ctx context.Context, req *logical.Request, d *fr
 	}
 
 	prehashed := d.Get("prehashed").(bool)
+
+	// An empty identifier makes sm2 fall back to the standard one, so callers
+	// that never set it keep signing exactly as before.
+	uid := d.Get("uid").(string)
 
 	// Get the policy
 	p, _, err := b.GetPolicy(ctx, PolicyRequest{
@@ -275,7 +292,12 @@ func (b *backend) pathSignWrite(ctx context.Context, req *logical.Request, d *fr
 
 		// Managed keys are rejected when the policy is created, so no managed
 		// key parameters can ever be needed here.
-		sig, err := p.SignWithOptions(ver, nil, input, &SigningOptions{Prehashed: prehashed, Marshaling: marshaling})
+		itemUID := uid
+		if raw, ok := item["uid"]; ok && raw != "" {
+			itemUID = raw
+		}
+
+		sig, err := p.SignWithOptions(ver, nil, input, &SigningOptions{Prehashed: prehashed, Marshaling: marshaling, UID: []byte(itemUID)})
 		if err != nil {
 			if batchInputRaw != nil {
 				response[i].Error = err.Error()
@@ -395,6 +417,10 @@ func (b *backend) pathVerifyWrite(ctx context.Context, req *logical.Request, d *
 
 	prehashed := d.Get("prehashed").(bool)
 
+	// The identifier must be the one the signature was created with, otherwise
+	// the Z value differs and verification fails.
+	uid := d.Get("uid").(string)
+
 	// Get the policy
 	p, _, err := b.GetPolicy(ctx, PolicyRequest{
 		Storage: req.Storage,
@@ -449,7 +475,12 @@ func (b *backend) pathVerifyWrite(ctx context.Context, req *logical.Request, d *
 			continue
 		}
 
-		valid, err := p.VerifySignatureWithOptions(nil, input, sig, &SigningOptions{Prehashed: prehashed, Marshaling: marshaling})
+		itemUID := uid
+		if raw, ok := item["uid"].(string); ok && raw != "" {
+			itemUID = raw
+		}
+
+		valid, err := p.VerifySignatureWithOptions(nil, input, sig, &SigningOptions{Prehashed: prehashed, Marshaling: marshaling, UID: []byte(itemUID)})
 		if err != nil {
 			switch err.(type) {
 			case errutil.UserError:
@@ -502,4 +533,6 @@ const pathVerifyHelpSyn = `Verify a signature or HMAC for input data created usi
 
 const pathVerifyHelpDesc = `
 Verifies a signature or HMAC of the input data using the named key and SM3 hash algorithm.
+An SM2 signature covers a Z value derived from the key and the user identifier, so 'uid'
+must be the one that was used when signing.
 `
