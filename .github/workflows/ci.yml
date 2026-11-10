@@ -126,18 +126,32 @@ jobs:
         [ "$(vault write -field=valid gmsm/verify/sm2-key input="$tampered" signature="$signature")" = "false" ]
 
     # The endpoints added on top of the README walkthrough: the certificate pair
-    # and the SM2 user identifier.
+    # and the SM2 user identifier. Every check names itself and prints what it
+    # saw, because a bare [ ... = ... ] turns a wrong answer into a red step that
+    # explains nothing.
     - name: Run certificate and identifier walkthrough
       run: |
         set -euo pipefail
+
+        fail() {
+          echo "::error::$1"
+          exit 1
+        }
+
+        expect() {
+          [ "${3-}" = "$2" ] || fail "$1: got '${3-}', want '$2'"
+        }
+
         plaintext=$(printf 'my secret data' | base64)
 
         # The plugin signs the request with the key it stores, an external CA
         # signs that request, and the chain is stored back on the key version.
         vault write -field=csr gmsm/keys/sm2-key/csr version=1 > "$RUNNER_TEMP/request.pem"
-        grep -q 'BEGIN CERTIFICATE REQUEST' "$RUNNER_TEMP/request.pem"
+        grep -q 'BEGIN CERTIFICATE REQUEST' "$RUNNER_TEMP/request.pem" \
+          || fail "the key endpoint did not return a PEM request: $(cat "$RUNNER_TEMP/request.pem")"
 
-        go run ./scripts/ci/sm2ca -csr "$RUNNER_TEMP/request.pem" -out "$RUNNER_TEMP/chain.pem"
+        go run ./scripts/ci/sm2ca -csr "$RUNNER_TEMP/request.pem" -out "$RUNNER_TEMP/chain.pem" \
+          || fail "the test CA could not sign the request"
 
         vault write gmsm/keys/sm2-key/set-certificate version=1 \
           certificate_chain="$(cat "$RUNNER_TEMP/chain.pem")"
@@ -146,37 +160,49 @@ jobs:
         # a client cannot build the chain it was handed.
         vault read -format=json gmsm/export/certificate-chain/sm2-key > "$RUNNER_TEMP/export.json"
         certificates=$(grep -o 'BEGIN CERTIFICATE' "$RUNNER_TEMP/export.json" | wc -l || true)
-        if [ "$certificates" != "2" ]; then
-          echo '::error::the exported chain does not hold both certificates'
-          cat "$RUNNER_TEMP/export.json"
-          exit 1
-        fi
+        [ "$certificates" = "2" ] \
+          || fail "the export holds $certificates certificates, want 2: $(cat "$RUNNER_TEMP/export.json")"
 
         # A chain that belongs to another key must be refused, otherwise the
         # export would attest a key the plugin does not hold.
         vault write gmsm/keys/foreign-key type=ecdsa-sm2 > /dev/null
-        vault write -field=csr gmsm/keys/foreign-key/csr > "$RUNNER_TEMP/foreign.pem"
-        go run ./scripts/ci/sm2ca -csr "$RUNNER_TEMP/foreign.pem" -out "$RUNNER_TEMP/foreign-chain.pem" > /dev/null
-        if vault write gmsm/keys/sm2-key/set-certificate version=1 \
-             certificate_chain="$(cat "$RUNNER_TEMP/foreign-chain.pem")" > /dev/null 2>&1; then
-          echo '::error::a certificate chain of another key was accepted'
-          exit 1
+        vault write -field=csr gmsm/keys/foreign-key/csr version=1 > "$RUNNER_TEMP/foreign.pem"
+        go run ./scripts/ci/sm2ca -csr "$RUNNER_TEMP/foreign.pem" -out "$RUNNER_TEMP/foreign-chain.pem" > /dev/null \
+          || fail "the test CA could not sign the foreign request"
+
+        if foreign=$(vault write gmsm/keys/sm2-key/set-certificate version=1 \
+            certificate_chain="$(cat "$RUNNER_TEMP/foreign-chain.pem")" 2>&1); then
+          fail "a certificate chain of another key was accepted"
         fi
+        case $foreign in
+          *"does not match the key version selected"*) ;;
+          *) fail "the foreign chain was rejected for an unexpected reason: $foreign" ;;
+        esac
 
         # Only the key types that sign can carry a certificate, and mykey is
         # sm4-gcm96 from the README walkthrough.
-        if vault write gmsm/keys/mykey/csr > /dev/null 2>&1; then
-          echo '::error::a symmetric key produced a certificate request'
-          exit 1
+        if symmetric=$(vault write gmsm/keys/mykey/csr version=1 2>&1); then
+          fail "a symmetric key produced a certificate request"
         fi
+        case $symmetric in
+          *"does not support certificates"*) ;;
+          *) fail "the symmetric key was rejected for an unexpected reason: $symmetric" ;;
+        esac
 
         # The identifier is part of the Z value the signature covers, so a
         # signature only verifies with the identifier it was created with.
         identified=$(vault write -field=signature gmsm/sign/sm2-key input="$plaintext" uid=alice@example.com)
-        [[ $identified == vault:v1:* ]]
-        [ "$(vault write -field=valid gmsm/verify/sm2-key input="$plaintext" signature="$identified" uid=alice@example.com)" = "true" ]
-        [ "$(vault write -field=valid gmsm/verify/sm2-key input="$plaintext" signature="$identified")" = "false" ]
-        [ "$(vault write -field=valid gmsm/verify/sm2-key input="$plaintext" signature="$identified" uid=bob@example.com)" = "false" ]
+        case $identified in
+          vault:v1:*) ;;
+          *) fail "signing returned '$identified' instead of a vault:v1 signature" ;;
+        esac
+
+        expect "verify with the identifier that signed" true \
+          "$(vault write -field=valid gmsm/verify/sm2-key input="$plaintext" signature="$identified" uid=alice@example.com)"
+        expect "verify without an identifier" false \
+          "$(vault write -field=valid gmsm/verify/sm2-key input="$plaintext" signature="$identified")"
+        expect "verify with another identifier" false \
+          "$(vault write -field=valid gmsm/verify/sm2-key input="$plaintext" signature="$identified" uid=bob@example.com)"
 
     # The REST test speaks to the same server over HTTP, so it catches what the
     # CLI hides: status codes, JSON key names and the shape of error responses.
