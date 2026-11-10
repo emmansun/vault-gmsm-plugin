@@ -440,8 +440,10 @@ jobs:
           *) fail "the missing authority was reported as: $out" ;;
         esac
 
-        # The authority is generated once, and an internal one keeps its key.
-        vault write "$PKI_MOUNT/root/generate/internal" \
+        # The authority is generated once, and an internal one keeps its key. The
+        # answer is parsed below, so it has to be asked for as JSON; the default
+        # is the table the CLI prints.
+        vault write -format=json "$PKI_MOUNT/root/generate/internal" \
           common_name="Test Root CA" organization=Acme ttl=8760h > "$RUNNER_TEMP/root.json"
         root_serial=$(jq -r '.data.serial_number // empty' "$RUNNER_TEMP/root.json")
         [ -n "$root_serial" ] || fail "root/generate returned no serial: $(cat "$RUNNER_TEMP/root.json")"
