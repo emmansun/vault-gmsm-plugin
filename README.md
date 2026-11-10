@@ -53,7 +53,7 @@ vault secrets enable -path=gmsm vault-gmsm-plugin
 
 vault plugin register -sha256="$(sha256sum /etc/vault/plugins/pki-gmsm | cut -d' ' -f1)" \
   secret pki-gmsm
-vault secrets enable -path=pki pki-gmsm
+vault secrets enable -path=pki-gmsm pki-gmsm
 ```
 
 Building from source, checksum files, the Windows build script, the Vault and Go
@@ -78,7 +78,7 @@ for name in vault-gmsm-plugin pki-gmsm; do
   vault plugin register -sha256="$(sha256sum ./plugins/$name | cut -d' ' -f1)" secret "$name"
 done
 vault secrets enable -path=gmsm vault-gmsm-plugin
-vault secrets enable -path=pki pki-gmsm
+vault secrets enable -path=pki-gmsm pki-gmsm
 ```
 
 Encrypt with SM4-GCM. The CLI base64-encodes nothing on its own, so the input to
@@ -117,10 +117,10 @@ vault:v2:oQ7Xb2cR4mN0yY8sK1pL5vT3jH6gF9dA2sE4rU8iO0k=
 Issue a certificate from the authority:
 
 ```console
-$ vault write pki/root/generate/internal common_name="Example Root CA" ttl=87600h
-$ vault write pki/roles/web allowed_domains=example.com allow_subdomains=true \
+$ vault write pki-gmsm/root/generate/internal common_name="Example Root CA" ttl=87600h
+$ vault write pki-gmsm/roles/web allowed_domains=example.com allow_subdomains=true \
     ttl=24h max_ttl=720h
-$ vault write pki/issue/web common_name=web.example.com alt_names=api.example.com
+$ vault write pki-gmsm/issue/web common_name=web.example.com alt_names=api.example.com
 ```
 
 ## Documentation

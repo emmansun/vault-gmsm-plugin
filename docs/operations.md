@@ -53,7 +53,7 @@ PLUGIN_NAME=pki-gmsm
 CHECKSUM=$(sha256sum "$PLUGIN_DIR/$PLUGIN_NAME" | cut -d' ' -f1)
 
 vault plugin register -sha256="$CHECKSUM" secret pki-gmsm
-vault secrets enable -path=pki pki-gmsm
+vault secrets enable -path=pki-gmsm pki-gmsm
 ```
 
 ### From source
@@ -107,8 +107,8 @@ difference is recorded, by naming the plugin that changed.
   plus `allow_plaintext_backup` are what decide whether those plaintext routes
   exist at all.
 - **The authority is a single object per mount.** Generating a second root over
-  an existing one is refused, and `DELETE pki/root` is the only way to replace
-  it: it takes the issued certificates and the cached CRL with it.
+  an existing one is refused, and `DELETE pki-gmsm/root` is the only way to
+  replace it: it takes the issued certificates and the cached CRL with it.
 - **The CRL is signed lazily.** A revocation marks the cached CRL dirty and the
   next read rebuilds it, so an unused mount never pays for a signature it did
   not ask for.
@@ -122,7 +122,7 @@ main.go              the transit plugin binary
 cmd/pki-gmsm/        the certificate authority plugin binary
 internal/testca/     test-only SM2 CA that issues chains from certificate requests
 scripts/ci/sm2ca/    CLI wrapper around internal/testca, used by the CI walkthrough
-scripts/ci/pkicheck/ CLI check that a certificate the pki mount issued verifies
+scripts/ci/pkicheck/ CLI check that a certificate the pki-gmsm mount issued verifies
 scripts/             build helpers
 ```
 

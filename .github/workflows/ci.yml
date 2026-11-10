@@ -416,7 +416,22 @@ jobs:
         vault plugin register -sha256="$(sha256sum "$plugin_bin" | cut -d' ' -f1)" secret pki-gmsm
         vault secrets enable -path="$PKI_MOUNT" pki-gmsm
 
-        # A mount without an authority refuses to issue, and says what to do.
+        # The role is looked up first, because it is what says whether the
+        # request may be built at all; a mount with neither refuses there.
+        if out=$(vault write "$PKI_MOUNT/issue/web" common_name=web.example.com 2>&1); then
+          fail "a mount without a role issued a certificate"
+        fi
+        case $out in
+          *'role "web" does not exist'*) ;;
+          *) fail "the missing role was reported as: $out" ;;
+        esac
+
+        # A role is policy rather than state of the authority, so it can be
+        # written to a mount that has no authority yet; issuing then fails on the
+        # authority, and says what to do about it.
+        vault write "$PKI_MOUNT/roles/web" allowed_domains=example.com allow_subdomains=true \
+          ttl=24h max_ttl=720h > /dev/null
+
         if out=$(vault write "$PKI_MOUNT/issue/web" common_name=web.example.com 2>&1); then
           fail "a mount without an authority issued a certificate"
         fi
@@ -443,9 +458,6 @@ jobs:
           *"already holds a certificate authority"*) ;;
           *) fail "the second authority was refused as: $second" ;;
         esac
-
-        vault write "$PKI_MOUNT/roles/web" allowed_domains=example.com allow_subdomains=true \
-          ttl=24h max_ttl=720h > /dev/null
 
         # The role decides what may be issued; the refusal names the policy.
         if out=$(vault write "$PKI_MOUNT/issue/web" common_name=web.other.com 2>&1); then
@@ -491,7 +503,9 @@ jobs:
           *) fail "crl/der answered with content type '$der_type'" ;;
         esac
 
-        vault write "$PKI_MOUNT/crl/rotate" > /dev/null
+        # Rotation takes no parameters, and the CLI refuses a write with no data
+        # unless it is forced.
+        vault write -f "$PKI_MOUNT/crl/rotate" > /dev/null
         expect "rotating the CRL increments its number" "$((crl_number + 1))" \
           "$(vault read -field=number "$PKI_MOUNT/crl")"
 

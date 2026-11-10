@@ -13,11 +13,14 @@ PLUGIN_NAME=pki-gmsm
 CHECKSUM=$(sha256sum "$PLUGIN_DIR/$PLUGIN_NAME" | cut -d' ' -f1)
 
 vault plugin register -sha256="$CHECKSUM" secret pki-gmsm
-vault secrets enable -path=pki pki-gmsm
+vault secrets enable -path=pki-gmsm pki-gmsm
 ```
 
 The binary and the registered name are the same string, because Vault looks for
-`$PLUGIN_DIR/<registered name>` and does not try a prefixed variant.
+`$PLUGIN_DIR/<registered name>` and does not try a prefixed variant. The mount
+path is free to choose and is `pki-gmsm` here, so it does not collide with the
+built-in `pki` engine, which usually already occupies `pki/`. Every path below
+is relative to the mount.
 
 A mount holds one authority and always signs with it. There is no `issuer_ref`
 to pick from, and generating a second authority over an existing one is refused:
@@ -39,7 +42,7 @@ the certificates already issued would stop verifying against it.
 ## Generating the authority
 
 ```console
-$ vault write pki/root/generate/internal common_name="Example Root CA" ttl=87600h
+$ vault write pki-gmsm/root/generate/internal common_name="Example Root CA" ttl=87600h
 Key            Value
 ---            -----
 certificate    -----BEGIN CERTIFICATE-----…
@@ -62,9 +65,9 @@ same value as its authority key identifier, which is what a self-signed
 certificate needs to terminate a chain. `ca`, `ca/pem` (raw
 `application/pem-encoding`) and `ca_chain` read it back.
 
-`DELETE pki/root` removes the authority, its keys, every certificate it issued
-and the cached CRL. Roles survive, because they are policy rather than state of
-the authority.
+`DELETE pki-gmsm/root` removes the authority, its keys, every certificate it
+issued and the cached CRL. Roles survive, because they are policy rather than
+state of the authority.
 
 ## Roles
 
@@ -73,7 +76,7 @@ the request has passed it, so a refused request never leaves a certificate
 behind.
 
 ```console
-$ vault write pki/roles/web allowed_domains=example.com allow_subdomains=true \
+$ vault write pki-gmsm/roles/web allowed_domains=example.com allow_subdomains=true \
     ttl=24h max_ttl=720h
 ```
 
@@ -112,10 +115,10 @@ to their defaults:
 
 ```bash
 # Wrong: the role keeps key_usage and loses server_flag, ttl, ...
-vault write pki/roles/signing key_usage=DigitalSignature
+vault write pki-gmsm/roles/signing key_usage=DigitalSignature
 
 # Right: only key_usage changes
-vault patch pki/roles/signing key_usage=DigitalSignature
+vault patch pki-gmsm/roles/signing key_usage=DigitalSignature
 ```
 
 A patch of a role that does not exist is a no-op rather than an error.
@@ -126,13 +129,13 @@ A leaf that only signs data needs no subject alternative names and no TLS
 usages, and its common name is usually not a host name:
 
 ```bash
-vault write pki/roles/signing \
+vault write pki-gmsm/roles/signing \
     key_usage=DigitalSignature \
     server_flag=false client_flag=false code_signing_flag=true \
     allow_any_name=true enforce_hostnames=false \
     ttl=720h max_ttl=8760h
 
-vault write pki/issue/signing common_name="Example Release Signing 2026" \
+vault write pki-gmsm/issue/signing common_name="Example Release Signing 2026" \
     exclude_cn_from_sans=true
 ```
 
@@ -171,7 +174,7 @@ for SEC 1, `pkcs8`) and `key_type`; `sign` takes the `csr` as PEM or base64
 encoded DER, verifies its signature, and refuses a key that is not an SM2 key.
 
 ```console
-$ vault write pki/issue/web common_name=web.example.com alt_names=api.example.com
+$ vault write pki-gmsm/issue/web common_name=web.example.com alt_names=api.example.com
 ```
 
 An entry of `alt_names` that contains `@` becomes an email address, everything
@@ -216,7 +219,7 @@ A second mount becomes an intermediate of the first in two steps. The first
 mount never sees the key of the second:
 
 ```console
-$ vault write pki/root/sign-intermediate csr=@intermediate.pem \
+$ vault write pki-gmsm/root/sign-intermediate csr=@intermediate.pem \
     common_name="Example Issuing CA"
 $ vault write pki-int/intermediate/set-signed certificate=@signed.pem
 ```
