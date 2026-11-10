@@ -357,7 +357,7 @@ const pathImportKeyHelpSyn = `Import key material`
 const pathImportKeyHelpDesc = `
 This path creates a key from key material that was generated elsewhere. The
 material is supplied in the request, so it has to travel over TLS to the
-server; the transit style wrapping key exchange is not implemented.
+server; transit's wrapping key exchange and byok-export are not implemented.
 
 For ecdsa-sm2 the public half may be imported on its own, which leaves the key
 usable for verification and encryption only.

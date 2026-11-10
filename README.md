@@ -409,7 +409,7 @@ Certificates require a key type that can sign, which today means `ecdsa-sm2`.
 `keys/:name/import` creates a key from material that was generated elsewhere,
 and `keys/:name/import_version` adds further material to a key that was itself
 imported. Both take the material in the request body, so the transport has to be
-trusted; the wrapping-key exchange that transit offers is not implemented.
+trusted; transit's wrapping-key exchange and `byok-export` are not implemented.
 
 ```bash
 vault write gmsm/keys/imported type=ecdsa-sm2 private_key=@private.pem
@@ -462,10 +462,19 @@ so decrypting and verifying with it keeps working until
 | Signing input hashing | Configurable | Always SM3, optionally over a pre-computed digest |
 | User identifier | none | `uid` on sign and verify, mixed into the SM2 `Z` value |
 | Key import | supported | `import` and `import_version`, with plaintext material only: no wrapping key, and `import_version` stops once the key has been rotated in Vault |
+| Secure key transfer | `wrapping_key`, `byok-export` and `import` of a wrapped `ciphertext` | not implemented; `export`, `import` and `backup` all move material in plaintext |
 
 Everything else — versioned ciphertexts and signatures, key derivation,
 convergent encryption, associated data, batch requests, export, backup and
 restore — follows the transit behaviour.
+
+The secure transfer row is the deliberate omission. Transit's `wrapping_key` and
+`byok-export` exist so a key can move between two Vault instances without either
+operator handling plaintext, but `byok-export` is only useful together with an
+`import` that accepts the wrapped `ciphertext` it produces, and that half needs a
+wrapping keypair owned by the mount. Neither is implemented here, so moving a key
+in or out relies on TLS, on `exportable` and `allow_plaintext_backup`, and on the
+operator handling the material only where it is meant to be handled.
 
 ## Operational notes
 
@@ -483,9 +492,12 @@ restore — follows the transit behaviour.
   `partial_failure_response_code` if the caller needs a non-200 status to notice.
 - **The policy cache is per mount.** `cache-config` sets how many keys stay
   resident in memory; the default is unlimited and the minimum is 10.
-- **Imported material arrives in the request.** Send it over TLS only; unlike
-  transit there is no wrapping-key exchange. Once stored, an imported key is
-  protected exactly like a generated one.
+- **Key material moves in plaintext.** `export`, `import` and `backup` carry
+  material in a request or a response, so the path in between has to be trusted:
+  TLS to Vault, no response logging, no key files left behind. Transit's
+  wrapping-key exchange and `byok-export` are not implemented, and `exportable`
+  plus `allow_plaintext_backup` are what decide whether those plaintext routes
+  exist at all.
 
 ## Development
 
