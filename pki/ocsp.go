@@ -196,6 +196,10 @@ func ocspIssuerMatches(authority *smx509.Certificate, request *ocspRequest) (boo
 type ocspAnswer struct {
 	status    int
 	revokedAt time.Time
+
+	// reason is the code of RFC 5280 the revocation was recorded with, and zero
+	// when the caller named none.
+	reason int
 }
 
 // singleResponse is one answered certificate. The status is written out by hand
@@ -231,14 +235,21 @@ type responseEnvelope struct {
 }
 
 // signOCSPResponse writes the answer to one request and signs it with the
-// authority the request named.
-func signOCSPResponse(id certID, authority *smx509.Certificate, signer *sm2.PrivateKey, answer ocspAnswer) ([]byte, error) {
+// authority the request named. The validity is what the answer states as its
+// next update; a zero validity leaves that field out, which tells a client that
+// a fresher answer is available at any time.
+func signOCSPResponse(id certID, authority *smx509.Certificate, signer issuerKey, answer ocspAnswer, validity time.Duration) ([]byte, error) {
 	status, err := ocspCertStatus(answer)
 	if err != nil {
 		return nil, err
 	}
 
 	now := time.Now().UTC()
+	var nextUpdate time.Time
+	if validity > 0 {
+		nextUpdate = now.Add(validity)
+	}
+
 	data := responseData{
 		// The responder is the authority itself, named rather than keyed, so a
 		// client that holds the certificate it was issued under already holds
@@ -249,7 +260,7 @@ func signOCSPResponse(id certID, authority *smx509.Certificate, signer *sm2.Priv
 			CertID:     id,
 			CertStatus: status,
 			ThisUpdate: now,
-			NextUpdate: now.Add(ocspValidity),
+			NextUpdate: nextUpdate,
 		}},
 	}
 
@@ -286,8 +297,9 @@ func signOCSPResponse(id certID, authority *smx509.Certificate, signer *sm2.Priv
 }
 
 // ocspCertStatus encodes the choice the answer falls on. Revoked is the only
-// alternative with content: the time the revocation was recorded. The reason is
-// left out, because this mount records a time and nothing else.
+// alternative with content: the time the revocation was recorded, and the
+// reason when one was given. A client that sees a compromise can act on it,
+// while a certificate that was superseded needs nothing more than replacing.
 func ocspCertStatus(answer ocspAnswer) (asn1.RawValue, error) {
 	switch answer.status {
 	case ocspGood:
@@ -296,9 +308,22 @@ func ocspCertStatus(answer ocspAnswer) (asn1.RawValue, error) {
 		return asn1.RawValue{Class: 2, Tag: 2}, nil
 	}
 
-	info, err := asn1.Marshal(struct {
-		Time time.Time `asn1:"generalized"`
-	}{answer.revokedAt.UTC()})
+	var (
+		info []byte
+		err  error
+	)
+	if answer.reason == 0 {
+		// No reason was recorded, so the field is left out rather than sent as
+		// the code of an unspecified reason.
+		info, err = asn1.Marshal(struct {
+			Time time.Time `asn1:"generalized"`
+		}{answer.revokedAt.UTC()})
+	} else {
+		info, err = asn1.Marshal(struct {
+			Time   time.Time       `asn1:"generalized"`
+			Reason asn1.Enumerated `asn1:"explicit,tag:0"`
+		}{answer.revokedAt.UTC(), asn1.Enumerated(answer.reason)})
+	}
 	if err != nil {
 		return asn1.RawValue{}, fmt.Errorf("could not encode the revocation time: %w", err)
 	}

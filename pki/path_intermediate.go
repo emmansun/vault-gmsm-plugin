@@ -229,6 +229,7 @@ func (b *backend) pathIntermediateSetSignedWrite(ctx context.Context, req *logic
 	if err != nil {
 		return nil, err
 	}
+	defer b.closeSigner(key)
 
 	leaf := certs[0]
 	if !leaf.IsCA {
@@ -236,7 +237,7 @@ func (b *backend) pathIntermediateSetSignedWrite(ctx context.Context, req *logic
 	}
 
 	publicKey, ok := leaf.PublicKey.(*ecdsa.PublicKey)
-	if !ok || !publicKey.Equal(&key.PublicKey) {
+	if !ok || !publicKey.Equal(key.Public()) {
 		return logical.ErrorResponse("the certificate does not belong to the pending key of this mount"), logical.ErrInvalidRequest
 	}
 

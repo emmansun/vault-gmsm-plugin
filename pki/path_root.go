@@ -327,6 +327,24 @@ func (b *backend) pathRootSignIntermediate() *framework.Path {
 		Default:     -1,
 		Description: "Maximum number of authorities below the intermediate. -1 means no limit.",
 	}
+	fields["permitted_dns_domains"] = &framework.FieldSchema{
+		Type: framework.TypeCommaStringSlice,
+		Description: `DNS names the intermediate may vouch for, as a comma separated list. An
+entry starting with a dot also allows the subdomains below it.`,
+	}
+	fields["excluded_dns_domains"] = &framework.FieldSchema{
+		Type: framework.TypeCommaStringSlice,
+		Description: `DNS names the intermediate must not vouch for, as a comma separated
+list. An entry starting with a dot also excludes the subdomains below it.`,
+	}
+	fields["permitted_ip_addresses"] = &framework.FieldSchema{
+		Type:        framework.TypeCommaStringSlice,
+		Description: "IP ranges the intermediate may vouch for, as a comma separated list of CIDR blocks.",
+	}
+	fields["excluded_ip_addresses"] = &framework.FieldSchema{
+		Type:        framework.TypeCommaStringSlice,
+		Description: "IP ranges the intermediate must not vouch for, as a comma separated list of CIDR blocks.",
+	}
 	fields["use_csr_values"] = &framework.FieldSchema{
 		Type:        framework.TypeBool,
 		Default:     false,
@@ -389,6 +407,11 @@ func (b *backend) pathRootSignIntermediateWrite(ctx context.Context, req *logica
 		subject = subjectFromFields(d, commonName)
 	}
 
+	constraints, err := nameConstraintsFromFields(d)
+	if err != nil {
+		return logical.ErrorResponse(err.Error()), logical.ErrInvalidRequest
+	}
+
 	b.caMu.Lock()
 	defer b.caMu.Unlock()
 
@@ -400,14 +423,16 @@ func (b *backend) pathRootSignIntermediateWrite(ctx context.Context, req *logica
 	if err != nil {
 		return nil, err
 	}
+	defer b.closeSigner(signer)
 
 	request := certificateRequest{
-		Subject:    subject,
-		PublicKey:  publicKey,
-		KeyUsage:   smx509.KeyUsageCertSign | smx509.KeyUsageCRLSign | smx509.KeyUsageDigitalSignature,
-		IsCA:       true,
-		MaxPathLen: d.Get("max_path_length").(int),
-		TTL:        time.Duration(d.Get("ttl").(int)) * time.Second,
+		Subject:         subject,
+		PublicKey:       publicKey,
+		KeyUsage:        smx509.KeyUsageCertSign | smx509.KeyUsageCRLSign | smx509.KeyUsageDigitalSignature,
+		IsCA:            true,
+		MaxPathLen:      d.Get("max_path_length").(int),
+		TTL:             time.Duration(d.Get("ttl").(int)) * time.Second,
+		NameConstraints: constraints,
 	}
 	if useCSRValues {
 		request.DNSNames = csr.DNSNames
@@ -418,7 +443,7 @@ func (b *backend) pathRootSignIntermediateWrite(ctx context.Context, req *logica
 
 	cert, warnings, err := b.signWithIssuer(ctx, req.Storage, issuer, signer, request)
 	if err != nil {
-		return nil, err
+		return issuerError(err)
 	}
 
 	if err := b.storeIssuedCertificate(ctx, req.Storage, cert, "intermediate", issuer.ID, true); err != nil {

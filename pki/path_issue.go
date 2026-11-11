@@ -38,6 +38,10 @@ func issuanceFieldSchemas() map[string]*framework.FieldSchema {
 			Type:        framework.TypeCommaStringSlice,
 			Description: "URIs to place in the subject alternative names, as a comma separated list.",
 		},
+		"other_sans": {
+			Type:        framework.TypeCommaStringSlice,
+			Description: `Other subject alternative names, as OID;form:value entries, e.g. "1.3.6.1.4.1.311.20.2.3;utf8:department". The role decides which of them are allowed.`,
+		},
 		"ttl": {
 			Type:        framework.TypeDurationSecond,
 			Default:     0,
@@ -56,10 +60,9 @@ func issuanceFieldSchemas() map[string]*framework.FieldSchema {
 	}
 }
 
-// pathIssue issues a certificate for a key this mount generates. The private
-// key leaves the mount in the response and is never stored, unlike the key of
-// the certificate authority.
-func (b *backend) pathIssue() *framework.Path {
+// issueFields are what an operation that generates a key accepts: the issuance
+// fields and the two that decide how the key comes back.
+func issueFields() map[string]*framework.FieldSchema {
 	fields := issuanceFieldSchemas()
 	fields["private_key_format"] = &framework.FieldSchema{
 		Type:        framework.TypeString,
@@ -72,6 +75,13 @@ func (b *backend) pathIssue() *framework.Path {
 		Description: `Type of the generated key. Only "sm2" is supported.`,
 	}
 
+	return fields
+}
+
+// pathIssue issues a certificate for a key this mount generates. The private
+// key leaves the mount in the response and is never stored, unlike the key of
+// the certificate authority.
+func (b *backend) pathIssue() *framework.Path {
 	return &framework.Path{
 		Pattern: "issue/" + framework.GenericNameRegex("name") + "$",
 
@@ -81,7 +91,7 @@ func (b *backend) pathIssue() *framework.Path {
 			OperationSuffix: "certificate",
 		},
 
-		Fields: fields,
+		Fields: issueFields(),
 
 		Callbacks: map[logical.Operation]framework.OperationFunc{
 			logical.UpdateOperation: b.pathIssueWrite,
@@ -92,7 +102,43 @@ func (b *backend) pathIssue() *framework.Path {
 	}
 }
 
+// pathIssuerIssue is issue/:role with the authority named in the path, which is
+// how a caller picks one of several without a role that names it.
+func (b *backend) pathIssuerIssue() *framework.Path {
+	fields := issueFields()
+	fields["ref"] = issuerRefField()
+
+	return &framework.Path{
+		Pattern: "issuer/" + framework.GenericNameRegex("ref") + "/issue/" + framework.GenericNameRegex("name") + "$",
+
+		DisplayAttrs: &framework.DisplayAttributes{
+			OperationPrefix: operationPrefix + "-issuers",
+			OperationVerb:   "issue",
+			OperationSuffix: "certificate-with-issuer",
+		},
+
+		Fields: fields,
+
+		Callbacks: map[logical.Operation]framework.OperationFunc{
+			logical.UpdateOperation: b.pathIssuerIssueWrite,
+		},
+
+		HelpSynopsis:    pathIssueHelpSyn,
+		HelpDescription: pathIssueHelpDesc,
+	}
+}
+
 func (b *backend) pathIssueWrite(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+	return b.issueCertificate(ctx, req, d, "")
+}
+
+func (b *backend) pathIssuerIssueWrite(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+	return b.issueCertificate(ctx, req, d, d.Get("ref").(string))
+}
+
+// issueCertificate implements both paths. The ref the path names wins over the
+// one the role names, because the path is the more specific instruction.
+func (b *backend) issueCertificate(ctx context.Context, req *logical.Request, d *framework.FieldData, issuerRef string) (*logical.Response, error) {
 	roleName := strings.TrimSpace(d.Get("name").(string))
 
 	if err := checkSM2KeyType(d.Get("key_type").(string)); err != nil {
@@ -129,6 +175,11 @@ func (b *backend) pathIssueWrite(ctx context.Context, req *logical.Request, d *f
 		return nil, err
 	}
 
+	policyIdentifiers, err := role.policyIdentifiers()
+	if err != nil {
+		return nil, err
+	}
+
 	ttl, warnings := effectiveTTL(role, d.Get("ttl").(int))
 
 	key, err := sm2.GenerateKey(rand.Reader)
@@ -146,9 +197,12 @@ func (b *backend) pathIssueWrite(ctx context.Context, req *logical.Request, d *f
 		KeyUsage:           keyUsage,
 		ExtKeyUsage:        extKeyUsage,
 		UnknownExtKeyUsage: unknownExtKeyUsage,
+		PolicyIdentifiers:  policyIdentifiers,
+		OtherSANs:          names.OtherSANs,
 		TTL:                ttl,
+		NotAfter:           role.NotAfter,
 		NotBefore:          role.NotBeforeDuration,
-	}, role.IssuerRef)
+	}, issuerRefFor(role, issuerRef))
 	if err != nil {
 		return issuerError(err)
 	}
@@ -173,14 +227,20 @@ func (b *backend) pathIssueWrite(ctx context.Context, req *logical.Request, d *f
 	return &logical.Response{Data: data, Warnings: warnings}, nil
 }
 
-// pathSign signs a certificate request with a key the caller already holds.
-func (b *backend) pathSign() *framework.Path {
+// signFields are what an operation that signs a request accepts: the issuance
+// fields and the request itself.
+func signFields() map[string]*framework.FieldSchema {
 	fields := issuanceFieldSchemas()
 	fields["csr"] = &framework.FieldSchema{
 		Type:        framework.TypeString,
 		Description: "PEM or base64 encoded DER certificate request. Its signature is verified before it is signed.",
 	}
 
+	return fields
+}
+
+// pathSign signs a certificate request with a key the caller already holds.
+func (b *backend) pathSign() *framework.Path {
 	return &framework.Path{
 		Pattern: "sign/" + framework.GenericNameRegex("name") + "$",
 
@@ -190,7 +250,7 @@ func (b *backend) pathSign() *framework.Path {
 			OperationSuffix: "certificate",
 		},
 
-		Fields: fields,
+		Fields: signFields(),
 
 		Callbacks: map[logical.Operation]framework.OperationFunc{
 			logical.UpdateOperation: b.pathSignWrite,
@@ -201,7 +261,42 @@ func (b *backend) pathSign() *framework.Path {
 	}
 }
 
+// pathIssuerSign is sign/:role with the authority named in the path.
+func (b *backend) pathIssuerSign() *framework.Path {
+	fields := signFields()
+	fields["ref"] = issuerRefField()
+
+	return &framework.Path{
+		Pattern: "issuer/" + framework.GenericNameRegex("ref") + "/sign/" + framework.GenericNameRegex("name") + "$",
+
+		DisplayAttrs: &framework.DisplayAttributes{
+			OperationPrefix: operationPrefix + "-issuers",
+			OperationVerb:   "sign",
+			OperationSuffix: "certificate-with-issuer",
+		},
+
+		Fields: fields,
+
+		Callbacks: map[logical.Operation]framework.OperationFunc{
+			logical.UpdateOperation: b.pathIssuerSignWrite,
+		},
+
+		HelpSynopsis:    pathSignHelpSyn,
+		HelpDescription: pathSignHelpDesc,
+	}
+}
+
 func (b *backend) pathSignWrite(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+	return b.signCertificate(ctx, req, d, "")
+}
+
+func (b *backend) pathIssuerSignWrite(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+	return b.signCertificate(ctx, req, d, d.Get("ref").(string))
+}
+
+// signCertificate implements both paths, with the same precedence between the
+// ref of the path and the one of the role.
+func (b *backend) signCertificate(ctx context.Context, req *logical.Request, d *framework.FieldData, issuerRef string) (*logical.Response, error) {
 	roleName := strings.TrimSpace(d.Get("name").(string))
 
 	format, err := certificateFormat(d, false)
@@ -257,6 +352,10 @@ func (b *backend) pathSignWrite(ctx context.Context, req *logical.Request, d *fr
 	if err != nil {
 		return nil, err
 	}
+	policyIdentifiers, err := role.policyIdentifiers()
+	if err != nil {
+		return nil, err
+	}
 
 	ttl, warnings := effectiveTTL(role, d.Get("ttl").(int))
 
@@ -270,9 +369,12 @@ func (b *backend) pathSignWrite(ctx context.Context, req *logical.Request, d *fr
 		KeyUsage:           keyUsage,
 		ExtKeyUsage:        extKeyUsage,
 		UnknownExtKeyUsage: unknownExtKeyUsage,
+		PolicyIdentifiers:  policyIdentifiers,
+		OtherSANs:          names.OtherSANs,
 		TTL:                ttl,
+		NotAfter:           role.NotAfter,
 		NotBefore:          role.NotBeforeDuration,
-	}, role.IssuerRef)
+	}, issuerRefFor(role, issuerRef))
 	if err != nil {
 		return issuerError(err)
 	}
@@ -312,6 +414,7 @@ func (b *backend) signForMount(ctx context.Context, s logical.Storage, request c
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
+	defer b.closeSigner(signer)
 
 	cert, warnings, err := b.signWithIssuer(ctx, s, issuer, signer, request)
 	if err != nil {
@@ -331,15 +434,36 @@ func (e *issuerLookupError) Error() string { return e.err.Error() }
 
 func (e *issuerLookupError) Unwrap() error { return e.err }
 
-// issuerError turns a missing authority into the 400 every path answers with,
-// and leaves every other failure as it is.
+// issuerUsageError marks an operation the usage of an authority does not cover.
+// It is a mistake in the request rather than a failure of the mount, so it is
+// answered the way a missing authority is.
+type issuerUsageError struct {
+	issuer *issuerEntry
+	action string
+}
+
+func (e *issuerUsageError) Error() string {
+	return fmt.Sprintf("issuer %s is not allowed to %s; write what it may do with POST issuer/:ref", issuerLabel(e.issuer.ID, e.issuer), e.action)
+}
+
+// issuerError turns a refusal and a missing authority into the 400 every path
+// answers with, and leaves every other failure as it is.
 func issuerError(err error) (*logical.Response, error) {
-	var lookup *issuerLookupError
-	if err == errNoIssuer || errors.As(err, &lookup) {
+	if isRequestError(err) {
 		return logical.ErrorResponse(err.Error()), logical.ErrInvalidRequest
 	}
 
 	return nil, err
+}
+
+// isRequestError says whether a failure is a mistake in the request, which the
+// caller fixes, rather than a fault of the mount.
+func isRequestError(err error) bool {
+	var lookup *issuerLookupError
+	var usage *issuerUsageError
+	var expiry *leafExpiryError
+
+	return err == errNoIssuer || errors.As(err, &lookup) || errors.As(err, &usage) || errors.As(err, &expiry)
 }
 
 // certificateResponseData is the part of an issuance response that does not
@@ -358,6 +482,16 @@ func certificateResponseData(cert *smx509.Certificate, issuer *issuerEntry, chai
 		"expiration":    cert.NotAfter.Unix(),
 		"issuer_id":     issuer.ID,
 	}
+}
+
+// issuerRefFor is the authority a request signs with: the one the path names,
+// and the one the role names when the path names none.
+func issuerRefFor(role *roleEntry, ref string) string {
+	if ref != "" {
+		return ref
+	}
+
+	return role.IssuerRef
 }
 
 // roleForRequest loads the role of a request. A missing role is a bad request
@@ -397,6 +531,12 @@ func namesFromFields(d *framework.FieldData) (requestNames, error) {
 		return requestNames{}, err
 	}
 	names.URIs = uris
+
+	others, err := parseOtherSANs(d.Get("other_sans").([]string))
+	if err != nil {
+		return requestNames{}, err
+	}
+	names.OtherSANs = others
 
 	return names, nil
 }

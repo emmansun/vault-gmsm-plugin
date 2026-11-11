@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/emmansun/gmsm/sm2"
 	"github.com/emmansun/gmsm/smx509"
 	"github.com/hashicorp/vault/sdk/logical"
 )
@@ -28,7 +27,14 @@ const (
 	configIssuerPath     = "config/issuer"
 	configPendingKeyPath = "config/pending-key"
 	configURLsPath       = "config/urls"
+	configCRLPath        = "config/crl"
 )
+
+// crlStorePath is where the cached list of one authority is kept, and
+// deltaCRLStorePath where the changes since one of its lists are.
+func crlStorePath(issuerID string) string { return crlPrefix + issuerID }
+
+func deltaCRLStorePath(issuerID string) string { return crlPrefix + "delta/" + issuerID }
 
 // issuerIndex points at the issuer the mount currently uses. It exists so that
 // a future multi-issuer mount can add issuer records without moving any of the
@@ -36,6 +42,24 @@ const (
 type issuerIndex struct {
 	ID string `json:"id"`
 }
+
+// The usages an authority can be given. An authority that names none is
+// allowed all of them, which is what a mount written before the field existed
+// holds, and what a generated root starts with.
+const (
+	usageIssuing  = "issuing-certificates"
+	usageCRL      = "crl-signing"
+	usageOCSP     = "ocsp-signing"
+	usageReadOnly = "read-only"
+)
+
+// The ways a certificate that would outlive its authority can be handled:
+// refuse it, shorten it, or let it stand.
+const (
+	leafNotAfterErr      = "err"
+	leafNotAfterTruncate = "truncate"
+	leafNotAfterPermit   = "permit"
+)
 
 // issuerEntry is the certificate the mount signs with, the chain above it and
 // the key that belongs to it.
@@ -49,6 +73,67 @@ type issuerEntry struct {
 	Name        string    `json:"name,omitempty"`
 	Serial      string    `json:"serial"`
 	Created     time.Time `json:"created"`
+
+	// Usage says what the key of this authority may be used for. An empty
+	// list means everything, so an authority keeps working when the field is
+	// never written.
+	Usage []string `json:"usage,omitempty"`
+
+	// LeafNotAfterBehavior decides what happens to a certificate that would
+	// outlive the authority. An empty value shortens it, which is what the
+	// mount did before the field existed.
+	LeafNotAfterBehavior string `json:"leaf_not_after_behavior,omitempty"`
+
+	// URLs are the addresses this authority publishes in its certificates,
+	// which override the ones of config/urls one list at a time.
+	URLs *urlConfig `json:"urls,omitempty"`
+}
+
+// allows answers whether the authority may be used for one thing. An empty
+// usage allows everything, and read-only allows nothing.
+func (e *issuerEntry) allows(usage string) bool {
+	if len(e.Usage) == 0 {
+		return true
+	}
+
+	for _, entry := range e.Usage {
+		if entry == usage {
+			return true
+		}
+	}
+
+	return false
+}
+
+// checkUsage refuses an operation the usage of the authority does not cover.
+// The refusal is a mistake in the request rather than a failure of the mount,
+// so paths answer with it as a 400.
+func (e *issuerEntry) checkUsage(usage, action string) error {
+	if e.allows(usage) {
+		return nil
+	}
+
+	return &issuerUsageError{issuer: e, action: action}
+}
+
+// usageList is what a read reports: the usages the authority was given, or the
+// ones every authority has by default.
+func (e *issuerEntry) usageList() []string {
+	if len(e.Usage) == 0 {
+		return []string{usageIssuing, usageCRL, usageOCSP}
+	}
+
+	return e.Usage
+}
+
+// leafBehavior is the effective handling of a certificate that would outlive
+// the authority.
+func (e *issuerEntry) leafBehavior() string {
+	if e.LeafNotAfterBehavior == "" {
+		return leafNotAfterTruncate
+	}
+
+	return e.LeafNotAfterBehavior
 }
 
 func (e *issuerEntry) certificate() (*smx509.Certificate, error) {
@@ -79,10 +164,20 @@ func (e *issuerEntry) chain() ([]*smx509.Certificate, error) {
 	return certs, nil
 }
 
-// keyEntry holds the private half of the issuer. Only this record is seal
-// wrapped, and it is the only record that must never leave the mount.
+// keyEntry holds how the mount signs with an authority: the private half of a
+// key it holds, or the reference to one an appliance holds. Only this record is
+// seal wrapped, and a private key in it is the only secret that must never
+// leave the mount.
 type keyEntry struct {
-	PrivateKey []byte `json:"private_key"`
+	// PrivateKey is the PKCS#8 encoding of a key the mount holds. It is empty
+	// when the key lives elsewhere.
+	PrivateKey []byte `json:"private_key,omitempty"`
+
+	// Provider names the signer implementation that holds the key, and
+	// Reference is what that implementation needs to find it. Both are empty
+	// for a key the mount holds itself.
+	Provider  string `json:"provider,omitempty"`
+	Reference string `json:"reference,omitempty"`
 }
 
 // certEntry is a certificate the mount issued. The certificate is left out when
@@ -96,22 +191,28 @@ type certEntry struct {
 	Expiration  time.Time `json:"expiration"`
 }
 
-// revocationEntry records when a serial was revoked. It is the only input the
-// CRL is built from, which is why a certificate the mount did not store can
-// still be revoked. The expiration is copied from the certificate record when
-// there is one, so tidy can drop the entry once the CRL entry has aged out.
+// revocationEntry records when a serial was revoked and why. It is the only
+// input the CRL is built from, which is why a certificate the mount did not
+// store can still be revoked. The expiration is copied from the certificate
+// record when there is one, so tidy can drop the entry once the CRL entry has
+// aged out. The reason is a code of RFC 5280, and zero means unspecified, which
+// is what a caller that names no reason asks for.
 type revocationEntry struct {
 	IssuerID       string `json:"issuer_id"`
 	RevocationTime int64  `json:"revocation_time"`
 	RFC3339        string `json:"revocation_time_rfc3339"`
 	Expiration     int64  `json:"expiration,omitempty"`
+	Reason         int    `json:"reason,omitempty"`
 }
 
-// crlEntry caches the signed CRL. The DER has to be kept: an SM2 signature is
+// crlEntry caches a signed list. The DER has to be kept: an SM2 signature is
 // randomised, so rebuilding it on every read would answer with different bytes
 // for the same CRL number and defeat every cache in front of it.
 type crlEntry struct {
-	Number     string    `json:"number"`
+	Number string `json:"number"`
+	// BaseNumber is the number of the full list a delta is relative to, and
+	// empty for a full list.
+	BaseNumber string    `json:"base_number,omitempty"`
 	ThisUpdate time.Time `json:"this_update"`
 	NextUpdate time.Time `json:"next_update"`
 	DER        []byte    `json:"der,omitempty"`
@@ -124,6 +225,45 @@ type urlConfig struct {
 	IssuingCertificates   []string `json:"issuing_certificates"`
 	CRLDistributionPoints []string `json:"crl_distribution_points"`
 	OCSPServers           []string `json:"ocsp_servers"`
+}
+
+// crlConfig carries how long the mount says what it hands a client stays
+// current. An answer of the responder states when it should be asked again, and
+// how long that is belongs to the operator: a mount in front of a stapling
+// cache can allow more than one whose clients poll it directly.
+type crlConfig struct {
+	// Expiry is how long a list claims to be current, and zero keeps the
+	// default.
+	Expiry int64 `json:"expiry"`
+
+	OCSPExpiry int64 `json:"ocsp_expiry"`
+
+	// AutoRebuild says whether a read may sign a list that went stale or that
+	// a revocation has outdated. Nil is a mount written before the setting
+	// existed, which always rebuilt.
+	AutoRebuild *bool `json:"auto_rebuild,omitempty"`
+}
+
+// ocspLifetime is the value of ocsp_expiry as a duration. Zero is allowed and
+// means that the answer does not state a next update at all.
+func (c *crlConfig) ocspLifetime() time.Duration {
+	return time.Duration(c.OCSPExpiry) * time.Second
+}
+
+// lifetime is how long a signed list claims to be current.
+func (c *crlConfig) lifetime() time.Duration {
+	if c.Expiry <= 0 {
+		return crlValidity
+	}
+
+	return time.Duration(c.Expiry) * time.Second
+}
+
+// rebuilds says whether a read signs a list that went stale, or that a
+// revocation has outdated. An operator turns it off when something else rotates
+// the lists on a schedule of its own.
+func (c *crlConfig) rebuilds() bool {
+	return c.AutoRebuild == nil || *c.AutoRebuild
 }
 
 // getJSON decodes the record at path, returning nil when it does not exist.
@@ -251,31 +391,6 @@ func (b *backend) issuers(ctx context.Context, s logical.Storage) ([]*issuerEntr
 	}
 
 	return entries, nil
-}
-
-// issuerSigner loads the private key of an issuer and refuses to go on when it
-// is missing or of the wrong shape. Both failures mean the mount is damaged, so
-// they are reported as errors rather than as bad requests.
-func (b *backend) issuerSigner(ctx context.Context, s logical.Storage, issuer *issuerEntry) (*sm2.PrivateKey, error) {
-	entry, err := getJSON[keyEntry](ctx, s, keyPrefix+issuer.KeyID)
-	if err != nil {
-		return nil, err
-	}
-	if entry == nil {
-		return nil, fmt.Errorf("the private key of issuer %q is missing", issuer.Name)
-	}
-
-	key, err := smx509.ParsePKCS8PrivateKey(entry.PrivateKey)
-	if err != nil {
-		return nil, fmt.Errorf("could not parse the issuer private key: %w", err)
-	}
-
-	sm2Key, ok := key.(*sm2.PrivateKey)
-	if !ok {
-		return nil, fmt.Errorf("the issuer private key is a %T, not an SM2 key", key)
-	}
-
-	return sm2Key, nil
 }
 
 // pendingKeyID is the key of an intermediate waiting for its certificate.
@@ -422,7 +537,7 @@ func (b *backend) retireIssuer(ctx context.Context, s logical.Storage, issuer *i
 		revocations++
 	}
 
-	paths := []string{crlPrefix + issuer.ID, issuerPrefix + issuer.ID}
+	paths := []string{crlStorePath(issuer.ID), deltaCRLStorePath(issuer.ID), issuerPrefix + issuer.ID}
 	if issuer.KeyID != "" {
 		paths = append(paths, keyPrefix+issuer.KeyID)
 	}
@@ -464,7 +579,7 @@ func (b *backend) chooseDefaultIssuer(ctx context.Context, s logical.Storage, re
 // currentCRL returns the cached CRL of one issuer, or nil when none has been
 // built yet.
 func (b *backend) currentCRL(ctx context.Context, s logical.Storage, issuerID string) (*crlEntry, error) {
-	entry, err := getJSON[crlEntry](ctx, s, crlPrefix+issuerID)
+	entry, err := getJSON[crlEntry](ctx, s, crlStorePath(issuerID))
 	if err != nil || entry != nil {
 		return entry, err
 	}
@@ -487,6 +602,40 @@ func (b *backend) urls(ctx context.Context, s logical.Storage) (*urlConfig, erro
 	config, err := getJSON[urlConfig](ctx, s, configURLsPath)
 	if err != nil || config == nil {
 		return &urlConfig{}, err
+	}
+
+	return config, nil
+}
+
+// urlsFor is what a certificate of one authority publishes: the addresses
+// written on that authority, and the ones of config/urls for every list it does
+// not override.
+func (b *backend) urlsFor(ctx context.Context, s logical.Storage, issuer *issuerEntry) (*urlConfig, error) {
+	config, err := b.urls(ctx, s)
+	if err != nil || issuer == nil || issuer.URLs == nil {
+		return config, err
+	}
+
+	if len(issuer.URLs.IssuingCertificates) > 0 {
+		config.IssuingCertificates = issuer.URLs.IssuingCertificates
+	}
+	if len(issuer.URLs.CRLDistributionPoints) > 0 {
+		config.CRLDistributionPoints = issuer.URLs.CRLDistributionPoints
+	}
+	if len(issuer.URLs.OCSPServers) > 0 {
+		config.OCSPServers = issuer.URLs.OCSPServers
+	}
+
+	return config, nil
+}
+
+// crlConfig returns how long an answer stays current, defaulting to what the
+// mount said before the setting existed so that a mount that never wrote it
+// behaves as it did.
+func (b *backend) crlConfig(ctx context.Context, s logical.Storage) (*crlConfig, error) {
+	config, err := getJSON[crlConfig](ctx, s, configCRLPath)
+	if err != nil || config == nil {
+		return &crlConfig{OCSPExpiry: int64(ocspValidity / time.Second)}, err
 	}
 
 	return config, nil

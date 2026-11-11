@@ -10,7 +10,8 @@
 //	pkicheck -cert leaf.pem -ca ca.pem
 //	pkicheck -request -cert leaf.pem -ca ca.pem
 //	pkicheck -response -ca ca.pem -status good < answer.der
-//	pkicheck -crl old.pem -ca old-ca.pem -serial 1F:2C:0E
+//	pkicheck -response -ca ca.pem -status revoked -reason 1 < answer.der
+//	pkicheck -crl old.pem -ca old-ca.pem -serial 1F:2C:0E -reason 1
 package main
 
 import (
@@ -38,6 +39,7 @@ func main() {
 	crlPath := flag.String("crl", "", "check the certificate revocation list at this path instead")
 	serial := flag.String("serial", "", "with -crl, the serial the list must name")
 	absent := flag.Bool("absent", false, "with -crl, the serial must not be named")
+	reason := flag.Int("reason", -1, "with -crl or -response, the reason code the revocation must state")
 	flag.Parse()
 
 	var err error
@@ -45,11 +47,11 @@ func main() {
 	case *ask && *answer:
 		err = errors.New("choose one of -request and -response")
 	case *crlPath != "":
-		err = checkCRL(*crlPath, *caPath, *serial, *absent)
+		err = checkCRL(*crlPath, *caPath, *serial, *absent, *reason)
 	case *ask:
 		err = printRequest(*certPath, *caPath)
 	case *answer:
-		err = checkResponse(os.Stdin, *caPath, *want)
+		err = checkResponse(os.Stdin, *caPath, *want, *reason)
 	default:
 		err = run(*certPath, *caPath)
 	}
@@ -89,7 +91,7 @@ func printRequest(certPath, caPath string) error {
 // checkResponse reads the DER of an answer and says what it holds. The signature
 // is checked against the authority, because an answer nothing verified would
 // pass whatever it claimed.
-func checkResponse(answer io.Reader, caPath, want string) error {
+func checkResponse(answer io.Reader, caPath, want string, reason int) error {
 	if caPath == "" {
 		return errors.New("-ca is required")
 	}
@@ -114,12 +116,19 @@ func checkResponse(answer io.Reader, caPath, want string) error {
 	if want != "" && !strings.EqualFold(result.CertStatus.String(), want) {
 		return fmt.Errorf("the responder reports the certificate as %v, want %s", result.CertStatus, want)
 	}
+	if reason >= 0 && result.CertStatus != ocspclient.CertRevoked {
+		return errors.New("a reason was asked for, but the certificate is not reported as revoked")
+	}
+	if reason >= 0 && result.RevocationReason != reason {
+		return fmt.Errorf("the answer reports reason %d, want %d", result.RevocationReason, reason)
+	}
 
 	fmt.Printf("serial %x is %v, this update %s, next update %s\n",
 		result.Serial, result.CertStatus,
 		result.ThisUpdate.Format(time.RFC3339), result.NextUpdate.Format(time.RFC3339))
 	if result.CertStatus == ocspclient.CertRevoked {
-		fmt.Printf("revoked at %s\n", result.RevokedAt.Format(time.RFC3339))
+		fmt.Printf("revoked at %s with reason %d\n",
+			result.RevokedAt.Format(time.RFC3339), result.RevocationReason)
 	}
 
 	return nil
@@ -128,9 +137,12 @@ func checkResponse(answer io.Reader, caPath, want string) error {
 // checkCRL verifies that a list was signed by the authority that should have
 // signed it, and says whether it names one serial. The signature is what a
 // client checks, so a list nothing verified would pass whatever it contained.
-func checkCRL(path, caPath, serial string, absent bool) error {
+func checkCRL(path, caPath, serial string, absent bool, reason int) error {
 	if caPath == "" {
 		return errors.New("-ca is required")
+	}
+	if reason >= 0 && serial == "" {
+		return errors.New("-reason needs -serial to say which revocation it describes")
 	}
 
 	der, err := os.ReadFile(path)
@@ -160,19 +172,22 @@ func checkCRL(path, caPath, serial string, absent bool) error {
 			return err
 		}
 
-		listed := false
-		for _, entry := range list.RevokedCertificateEntries {
-			if entry.SerialNumber.Cmp(wanted) == 0 {
-				listed = true
+		var entry *smx509.RevocationListEntry
+		for i := range list.RevokedCertificateEntries {
+			if list.RevokedCertificateEntries[i].SerialNumber.Cmp(wanted) == 0 {
+				entry = &list.RevokedCertificateEntries[i]
 				break
 			}
 		}
 
-		if absent && listed {
+		if absent && entry != nil {
 			return fmt.Errorf("the list names %s, which it should not", serial)
 		}
-		if !absent && !listed {
+		if !absent && entry == nil {
 			return fmt.Errorf("the list does not name %s", serial)
+		}
+		if entry != nil && reason >= 0 && entry.ReasonCode != reason {
+			return fmt.Errorf("%s is revoked with reason %d, want %d", serial, entry.ReasonCode, reason)
 		}
 	}
 

@@ -3,6 +3,8 @@ package pki
 import (
 	"context"
 	"crypto/rand"
+	"crypto/x509/pkix"
+	"encoding/asn1"
 	"fmt"
 	"math/big"
 	"net/http"
@@ -14,84 +16,100 @@ import (
 	"github.com/hashicorp/vault/sdk/logical"
 )
 
+// oidExtensionDeltaCRLIndicator is the extension by which a list says which full
+// list it carries the changes of. It is critical: a client that cannot read it
+// must not take the entries as a complete list.
+var oidExtensionDeltaCRLIndicator = asn1.ObjectIdentifier{2, 5, 29, 27}
+
+// crlReadPath builds one of the paths a list is served on: the JSON that reports
+// its number and times, or the raw body of the list itself. Each of them exists
+// for the list of the mount and for the list of one authority named in the path.
+func crlReadPath(pattern, prefix, suffix string, handler framework.OperationFunc, fields map[string]*framework.FieldSchema, synopsis, description string) *framework.Path {
+	return &framework.Path{
+		Pattern: pattern,
+
+		DisplayAttrs: &framework.DisplayAttributes{
+			OperationPrefix: prefix,
+			OperationVerb:   "read",
+			OperationSuffix: suffix,
+		},
+
+		Fields: fields,
+
+		Callbacks: map[logical.Operation]framework.OperationFunc{
+			logical.ReadOperation: handler,
+		},
+
+		HelpSynopsis:    synopsis,
+		HelpDescription: description,
+	}
+}
+
+// crlRotatePath is the counterpart that signs a new list whether or not anything
+// changed, which is what an operator reaches for when the cached one has gone
+// stale.
+func crlRotatePath(pattern, prefix, suffix string, handler framework.OperationFunc, fields map[string]*framework.FieldSchema, synopsis, description string) *framework.Path {
+	return &framework.Path{
+		Pattern: pattern,
+
+		DisplayAttrs: &framework.DisplayAttributes{
+			OperationPrefix: prefix,
+			OperationVerb:   "rotate",
+			OperationSuffix: suffix,
+		},
+
+		Fields: fields,
+
+		Callbacks: map[logical.Operation]framework.OperationFunc{
+			logical.UpdateOperation: handler,
+		},
+
+		HelpSynopsis:    synopsis,
+		HelpDescription: description,
+	}
+}
+
 // pathCRL serves the certificate revocation list as JSON, with the list in a
 // field. The raw forms are on crl/pem and crl/der.
 func (b *backend) pathCRL() *framework.Path {
-	return &framework.Path{
-		Pattern: "crl$",
-
-		DisplayAttrs: &framework.DisplayAttributes{
-			OperationPrefix: operationPrefix,
-			OperationVerb:   "read",
-			OperationSuffix: "crl",
-		},
-
-		Callbacks: map[logical.Operation]framework.OperationFunc{
-			logical.ReadOperation: b.pathCRLRead,
-		},
-
-		HelpSynopsis:    pathCRLHelpSyn,
-		HelpDescription: pathCRLHelpDesc,
-	}
+	return crlReadPath("crl$", operationPrefix, "crl", b.pathCRLRead, nil, pathCRLHelpSyn, pathCRLHelpDesc)
 }
 
 func (b *backend) pathCRLPEM() *framework.Path {
-	return &framework.Path{
-		Pattern: "crl/pem$",
-
-		DisplayAttrs: &framework.DisplayAttributes{
-			OperationPrefix: operationPrefix,
-			OperationVerb:   "read",
-			OperationSuffix: "crl-pem",
-		},
-
-		Callbacks: map[logical.Operation]framework.OperationFunc{
-			logical.ReadOperation: b.pathCRLPEMRead,
-		},
-
-		HelpSynopsis:    pathCRLHelpSyn,
-		HelpDescription: pathCRLHelpDesc,
-	}
+	return crlReadPath("crl/pem$", operationPrefix, "crl-pem", b.pathCRLPEMRead, nil, pathCRLHelpSyn, pathCRLHelpDesc)
 }
 
 func (b *backend) pathCRLDER() *framework.Path {
-	return &framework.Path{
-		Pattern: "crl/der$",
-
-		DisplayAttrs: &framework.DisplayAttributes{
-			OperationPrefix: operationPrefix,
-			OperationVerb:   "read",
-			OperationSuffix: "crl-der",
-		},
-
-		Callbacks: map[logical.Operation]framework.OperationFunc{
-			logical.ReadOperation: b.pathCRLDERRead,
-		},
-
-		HelpSynopsis:    pathCRLHelpSyn,
-		HelpDescription: pathCRLHelpDesc,
-	}
+	return crlReadPath("crl/der$", operationPrefix, "crl-der", b.pathCRLDERRead, nil, pathCRLHelpSyn, pathCRLHelpDesc)
 }
 
-// pathCRLRotate rebuilds the list with a new number and a fresh validity, which
-// is what an operator reaches for when the cached one has gone stale.
+// pathCRLRotate rebuilds the list with a new number and a fresh validity.
 func (b *backend) pathCRLRotate() *framework.Path {
-	return &framework.Path{
-		Pattern: "crl/rotate$",
+	return crlRotatePath("crl/rotate$", operationPrefix, "crl", b.pathCRLRotateWrite, nil,
+		pathCRLRotateHelpSyn, pathCRLRotateHelpDesc)
+}
 
-		DisplayAttrs: &framework.DisplayAttributes{
-			OperationPrefix: operationPrefix,
-			OperationVerb:   "rotate",
-			OperationSuffix: "crl",
-		},
+// pathDeltaCRL serves the changes since the full list, which is what a client
+// that already holds that list fetches to catch up. The forms and the paths
+// mirror the full list.
+func (b *backend) pathDeltaCRL() *framework.Path {
+	return crlReadPath("crl/delta$", operationPrefix, "crl-delta", b.pathDeltaCRLRead, nil,
+		pathDeltaCRLHelpSyn, pathDeltaCRLHelpDesc)
+}
 
-		Callbacks: map[logical.Operation]framework.OperationFunc{
-			logical.UpdateOperation: b.pathCRLRotateWrite,
-		},
+func (b *backend) pathDeltaCRLPEM() *framework.Path {
+	return crlReadPath("crl/delta/pem$", operationPrefix, "crl-delta-pem", b.pathDeltaCRLPEMRead, nil,
+		pathDeltaCRLHelpSyn, pathDeltaCRLHelpDesc)
+}
 
-		HelpSynopsis:    pathCRLRotateHelpSyn,
-		HelpDescription: pathCRLRotateHelpDesc,
-	}
+func (b *backend) pathDeltaCRLDER() *framework.Path {
+	return crlReadPath("crl/delta/der$", operationPrefix, "crl-delta-der", b.pathDeltaCRLDERRead, nil,
+		pathDeltaCRLHelpSyn, pathDeltaCRLHelpDesc)
+}
+
+func (b *backend) pathDeltaCRLRotate() *framework.Path {
+	return crlRotatePath("crl/rotate-delta$", operationPrefix, "crl-delta", b.pathDeltaCRLRotateWrite, nil,
+		pathDeltaCRLRotateHelpSyn, pathDeltaCRLRotateHelpDesc)
 }
 
 // pathIssuerCRL serves the list of one authority, addressed the way issuer/:ref
@@ -99,162 +117,141 @@ func (b *backend) pathCRLRotate() *framework.Path {
 // the certificates of the authority it replaced point at a list of their own,
 // and crl answers only for the one that signs now.
 func (b *backend) pathIssuerCRL() *framework.Path {
-	return &framework.Path{
-		Pattern: "issuer/" + framework.GenericNameRegex("ref") + "/crl$",
-
-		DisplayAttrs: &framework.DisplayAttributes{
-			OperationPrefix: operationPrefix + "-issuers",
-			OperationVerb:   "read",
-			OperationSuffix: "issuer-crl",
-		},
-
-		Fields: map[string]*framework.FieldSchema{
-			"ref": {
-				Type:        framework.TypeString,
-				Description: `Identifier or name of the issuer whose list is read, or "default" for the one this mount signs with.`,
-			},
-		},
-
-		Callbacks: map[logical.Operation]framework.OperationFunc{
-			logical.ReadOperation: b.pathIssuerCRLRead,
-		},
-
-		HelpSynopsis:    pathIssuerCRLHelpSyn,
-		HelpDescription: pathIssuerCRLHelpDesc,
-	}
+	return crlReadPath("issuer/"+framework.GenericNameRegex("ref")+"/crl$", operationPrefix+"-issuers",
+		"issuer-crl", b.pathIssuerCRLRead, issuerCRLFields(), pathIssuerCRLHelpSyn, pathIssuerCRLHelpDesc)
 }
 
 func (b *backend) pathIssuerCRLPEM() *framework.Path {
-	return &framework.Path{
-		Pattern: "issuer/" + framework.GenericNameRegex("ref") + "/crl/pem$",
-
-		DisplayAttrs: &framework.DisplayAttributes{
-			OperationPrefix: operationPrefix + "-issuers",
-			OperationVerb:   "read",
-			OperationSuffix: "issuer-crl-pem",
-		},
-
-		Fields: map[string]*framework.FieldSchema{
-			"ref": {
-				Type:        framework.TypeString,
-				Description: `Identifier or name of the issuer whose list is read, or "default" for the one this mount signs with.`,
-			},
-		},
-
-		Callbacks: map[logical.Operation]framework.OperationFunc{
-			logical.ReadOperation: b.pathIssuerCRLPEMRead,
-		},
-
-		HelpSynopsis:    pathIssuerCRLHelpSyn,
-		HelpDescription: pathIssuerCRLHelpDesc,
-	}
+	return crlReadPath("issuer/"+framework.GenericNameRegex("ref")+"/crl/pem$", operationPrefix+"-issuers",
+		"issuer-crl-pem", b.pathIssuerCRLPEMRead, issuerCRLFields(), pathIssuerCRLHelpSyn, pathIssuerCRLHelpDesc)
 }
 
 func (b *backend) pathIssuerCRLDER() *framework.Path {
-	return &framework.Path{
-		Pattern: "issuer/" + framework.GenericNameRegex("ref") + "/crl/der$",
-
-		DisplayAttrs: &framework.DisplayAttributes{
-			OperationPrefix: operationPrefix + "-issuers",
-			OperationVerb:   "read",
-			OperationSuffix: "issuer-crl-der",
-		},
-
-		Fields: map[string]*framework.FieldSchema{
-			"ref": {
-				Type:        framework.TypeString,
-				Description: `Identifier or name of the issuer whose list is read, or "default" for the one this mount signs with.`,
-			},
-		},
-
-		Callbacks: map[logical.Operation]framework.OperationFunc{
-			logical.ReadOperation: b.pathIssuerCRLDERRead,
-		},
-
-		HelpSynopsis:    pathIssuerCRLHelpSyn,
-		HelpDescription: pathIssuerCRLHelpDesc,
-	}
+	return crlReadPath("issuer/"+framework.GenericNameRegex("ref")+"/crl/der$", operationPrefix+"-issuers",
+		"issuer-crl-der", b.pathIssuerCRLDERRead, issuerCRLFields(), pathIssuerCRLHelpSyn, pathIssuerCRLHelpDesc)
 }
 
 // pathIssuerCRLRotate is the same forced rebuild for one authority: it signs a
 // new list of that issuer under the next number of that issuer.
 func (b *backend) pathIssuerCRLRotate() *framework.Path {
-	return &framework.Path{
-		Pattern: "issuer/" + framework.GenericNameRegex("ref") + "/crl/rotate$",
+	return crlRotatePath("issuer/"+framework.GenericNameRegex("ref")+"/crl/rotate$", operationPrefix+"-issuers",
+		"issuer-crl", b.pathIssuerCRLRotateWrite, issuerCRLFields(), pathIssuerCRLRotateHelpSyn, pathIssuerCRLRotateHelpDesc)
+}
 
-		DisplayAttrs: &framework.DisplayAttributes{
-			OperationPrefix: operationPrefix + "-issuers",
-			OperationVerb:   "rotate",
-			OperationSuffix: "issuer-crl",
-		},
+func (b *backend) pathIssuerDeltaCRL() *framework.Path {
+	return crlReadPath("issuer/"+framework.GenericNameRegex("ref")+"/crl/delta$", operationPrefix+"-issuers",
+		"issuer-crl-delta", b.pathIssuerDeltaCRLRead, issuerCRLFields(), pathIssuerDeltaCRLHelpSyn, pathIssuerDeltaCRLHelpDesc)
+}
 
-		Fields: map[string]*framework.FieldSchema{
-			"ref": {
-				Type:        framework.TypeString,
-				Description: `Identifier or name of the issuer whose list is rebuilt, or "default" for the one this mount signs with.`,
-			},
-		},
+func (b *backend) pathIssuerDeltaCRLPEM() *framework.Path {
+	return crlReadPath("issuer/"+framework.GenericNameRegex("ref")+"/crl/delta/pem$", operationPrefix+"-issuers",
+		"issuer-crl-delta-pem", b.pathIssuerDeltaCRLPEMRead, issuerCRLFields(), pathIssuerDeltaCRLHelpSyn, pathIssuerDeltaCRLHelpDesc)
+}
 
-		Callbacks: map[logical.Operation]framework.OperationFunc{
-			logical.UpdateOperation: b.pathIssuerCRLRotateWrite,
-		},
+func (b *backend) pathIssuerDeltaCRLDER() *framework.Path {
+	return crlReadPath("issuer/"+framework.GenericNameRegex("ref")+"/crl/delta/der$", operationPrefix+"-issuers",
+		"issuer-crl-delta-der", b.pathIssuerDeltaCRLDERRead, issuerCRLFields(), pathIssuerDeltaCRLHelpSyn, pathIssuerDeltaCRLHelpDesc)
+}
 
-		HelpSynopsis:    pathIssuerCRLRotateHelpSyn,
-		HelpDescription: pathIssuerCRLHelpDesc,
-	}
+func (b *backend) pathIssuerDeltaCRLRotate() *framework.Path {
+	return crlRotatePath("issuer/"+framework.GenericNameRegex("ref")+"/crl/rotate-delta$", operationPrefix+"-issuers",
+		"issuer-crl-delta", b.pathIssuerDeltaCRLRotateWrite, issuerCRLFields(),
+		pathIssuerDeltaCRLRotateHelpSyn, pathIssuerDeltaCRLRotateHelpDesc)
+}
+
+// issuerCRLFields is the ref of every path that serves a list of one authority.
+func issuerCRLFields() map[string]*framework.FieldSchema {
+	return map[string]*framework.FieldSchema{"ref": issuerRefField()}
 }
 
 func (b *backend) pathCRLRead(ctx context.Context, req *logical.Request, _ *framework.FieldData) (*logical.Response, error) {
-	return b.crlJSON(ctx, req.Storage, issuerRefDefault)
+	return b.crlJSON(ctx, req.Storage, issuerRefDefault, false)
 }
 
 func (b *backend) pathCRLPEMRead(ctx context.Context, req *logical.Request, _ *framework.FieldData) (*logical.Response, error) {
-	return b.crlPEM(ctx, req.Storage, issuerRefDefault)
+	return b.crlPEM(ctx, req.Storage, issuerRefDefault, false)
 }
 
 func (b *backend) pathCRLDERRead(ctx context.Context, req *logical.Request, _ *framework.FieldData) (*logical.Response, error) {
-	return b.crlDER(ctx, req.Storage, issuerRefDefault)
+	return b.crlDER(ctx, req.Storage, issuerRefDefault, false)
 }
 
 func (b *backend) pathCRLRotateWrite(ctx context.Context, req *logical.Request, _ *framework.FieldData) (*logical.Response, error) {
-	return b.crlRotate(ctx, req.Storage, issuerRefDefault)
+	return b.crlRotate(ctx, req.Storage, issuerRefDefault, false)
 }
 
-// The four handlers below answer the same way for the authority the path names,
+func (b *backend) pathDeltaCRLRead(ctx context.Context, req *logical.Request, _ *framework.FieldData) (*logical.Response, error) {
+	return b.crlJSON(ctx, req.Storage, issuerRefDefault, true)
+}
+
+func (b *backend) pathDeltaCRLPEMRead(ctx context.Context, req *logical.Request, _ *framework.FieldData) (*logical.Response, error) {
+	return b.crlPEM(ctx, req.Storage, issuerRefDefault, true)
+}
+
+func (b *backend) pathDeltaCRLDERRead(ctx context.Context, req *logical.Request, _ *framework.FieldData) (*logical.Response, error) {
+	return b.crlDER(ctx, req.Storage, issuerRefDefault, true)
+}
+
+func (b *backend) pathDeltaCRLRotateWrite(ctx context.Context, req *logical.Request, _ *framework.FieldData) (*logical.Response, error) {
+	return b.crlRotate(ctx, req.Storage, issuerRefDefault, true)
+}
+
+// The handlers below answer the same way for the authority the path names,
 // which is what a mount that has rotated needs: the certificates it signed keep
 // pointing at a list that belongs to them.
 func (b *backend) pathIssuerCRLRead(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
-	return b.crlJSON(ctx, req.Storage, d.Get("ref").(string))
+	return b.crlJSON(ctx, req.Storage, d.Get("ref").(string), false)
 }
 
 func (b *backend) pathIssuerCRLPEMRead(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
-	return b.crlPEM(ctx, req.Storage, d.Get("ref").(string))
+	return b.crlPEM(ctx, req.Storage, d.Get("ref").(string), false)
 }
 
 func (b *backend) pathIssuerCRLDERRead(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
-	return b.crlDER(ctx, req.Storage, d.Get("ref").(string))
+	return b.crlDER(ctx, req.Storage, d.Get("ref").(string), false)
 }
 
 func (b *backend) pathIssuerCRLRotateWrite(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
-	return b.crlRotate(ctx, req.Storage, d.Get("ref").(string))
+	return b.crlRotate(ctx, req.Storage, d.Get("ref").(string), false)
 }
 
-func (b *backend) crlJSON(ctx context.Context, s logical.Storage, ref string) (*logical.Response, error) {
-	entry, resp, err := b.crlForRead(ctx, s, ref)
+func (b *backend) pathIssuerDeltaCRLRead(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+	return b.crlJSON(ctx, req.Storage, d.Get("ref").(string), true)
+}
+
+func (b *backend) pathIssuerDeltaCRLPEMRead(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+	return b.crlPEM(ctx, req.Storage, d.Get("ref").(string), true)
+}
+
+func (b *backend) pathIssuerDeltaCRLDERRead(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+	return b.crlDER(ctx, req.Storage, d.Get("ref").(string), true)
+}
+
+func (b *backend) pathIssuerDeltaCRLRotateWrite(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+	return b.crlRotate(ctx, req.Storage, d.Get("ref").(string), true)
+}
+
+func (b *backend) crlJSON(ctx context.Context, s logical.Storage, ref string, delta bool) (*logical.Response, error) {
+	entry, resp, err := b.crlForRead(ctx, s, ref, delta)
 	if resp != nil || err != nil {
 		return resp, err
 	}
 
-	return &logical.Response{Data: map[string]interface{}{
+	data := map[string]interface{}{
 		"certificate": pemCRL(entry.DER),
 		"number":      entry.Number,
 		"this_update": entry.ThisUpdate.Unix(),
 		"next_update": entry.NextUpdate.Unix(),
-	}}, nil
+	}
+	if delta {
+		data["base_number"] = entry.BaseNumber
+	}
+
+	return &logical.Response{Data: data}, nil
 }
 
-func (b *backend) crlPEM(ctx context.Context, s logical.Storage, ref string) (*logical.Response, error) {
-	entry, resp, err := b.crlForRead(ctx, s, ref)
+func (b *backend) crlPEM(ctx context.Context, s logical.Storage, ref string, delta bool) (*logical.Response, error) {
+	entry, resp, err := b.crlForRead(ctx, s, ref, delta)
 	if resp != nil || err != nil {
 		return resp, err
 	}
@@ -266,8 +263,8 @@ func (b *backend) crlPEM(ctx context.Context, s logical.Storage, ref string) (*l
 	}}, nil
 }
 
-func (b *backend) crlDER(ctx context.Context, s logical.Storage, ref string) (*logical.Response, error) {
-	entry, resp, err := b.crlForRead(ctx, s, ref)
+func (b *backend) crlDER(ctx context.Context, s logical.Storage, ref string, delta bool) (*logical.Response, error) {
+	entry, resp, err := b.crlForRead(ctx, s, ref, delta)
 	if resp != nil || err != nil {
 		return resp, err
 	}
@@ -279,7 +276,7 @@ func (b *backend) crlDER(ctx context.Context, s logical.Storage, ref string) (*l
 	}}, nil
 }
 
-func (b *backend) crlRotate(ctx context.Context, s logical.Storage, ref string) (*logical.Response, error) {
+func (b *backend) crlRotate(ctx context.Context, s logical.Storage, ref string, delta bool) (*logical.Response, error) {
 	b.caMu.Lock()
 	defer b.caMu.Unlock()
 
@@ -288,27 +285,76 @@ func (b *backend) crlRotate(ctx context.Context, s logical.Storage, ref string) 
 		return resp, err
 	}
 
-	previous, err := b.currentCRL(ctx, s, issuer.ID)
+	config, err := b.crlConfig(ctx, s)
 	if err != nil {
 		return nil, err
 	}
 
-	entry, err := b.buildCRL(ctx, s, issuer, previous)
+	if !delta {
+		previous, err := b.currentCRL(ctx, s, issuer.ID)
+		if err != nil {
+			return nil, err
+		}
+
+		entry, err := b.buildCRL(ctx, s, issuer, previous, config)
+		if err != nil {
+			return issuerError(err)
+		}
+
+		return crlRotationResponse(entry, false), nil
+	}
+
+	// A delta is relative to a full list, so the base is signed again when it is
+	// missing or has expired: a client cannot apply a delta to a list it may no
+	// longer use. A base that merely went dirty is left alone when reads do not
+	// advance it, because renumbering it would leave the delta with nothing to
+	// carry.
+	var full *crlEntry
+	if config.rebuilds() {
+		full, err = b.fullCRLFor(ctx, s, issuer, config)
+	} else {
+		full, err = b.currentCRL(ctx, s, issuer.ID)
+		if err == nil && (full == nil || len(full.DER) == 0 || time.Now().After(full.NextUpdate)) {
+			full, err = b.buildCRL(ctx, s, issuer, full, config)
+		}
+	}
+	if err != nil {
+		return issuerError(err)
+	}
+
+	previous, err := b.currentDeltaCRL(ctx, s, issuer.ID)
 	if err != nil {
 		return nil, err
 	}
 
-	return &logical.Response{Data: map[string]interface{}{
+	entry, err := b.buildDeltaCRL(ctx, s, issuer, full, previous, config)
+	if err != nil {
+		return issuerError(err)
+	}
+
+	return crlRotationResponse(entry, true), nil
+}
+
+// crlRotationResponse says what the new list is: its number, the base it follows
+// when it is a delta, and the span it claims to be current.
+func crlRotationResponse(entry *crlEntry, delta bool) *logical.Response {
+	data := map[string]interface{}{
 		"number":      entry.Number,
 		"this_update": entry.ThisUpdate.Unix(),
 		"next_update": entry.NextUpdate.Unix(),
-	}}, nil
+	}
+	if delta {
+		data["base_number"] = entry.BaseNumber
+	}
+
+	return &logical.Response{Data: data}
 }
 
-// crlForRead answers with a usable list of one authority, rebuilding the cached
-// one when it is missing, stale or marks a revocation that arrived since it was
-// signed.
-func (b *backend) crlForRead(ctx context.Context, s logical.Storage, ref string) (*crlEntry, *logical.Response, error) {
+// crlForRead answers with a usable list of one authority: the full one, or the
+// changes since it. A list that is missing, stale, or outdated by a revocation
+// is rebuilt, unless config/crl turned rebuilding off, because a client cannot
+// be left applying changes to a list that never moves.
+func (b *backend) crlForRead(ctx context.Context, s logical.Storage, ref string, delta bool) (*crlEntry, *logical.Response, error) {
 	b.caMu.Lock()
 	defer b.caMu.Unlock()
 
@@ -317,20 +363,58 @@ func (b *backend) crlForRead(ctx context.Context, s logical.Storage, ref string)
 		return nil, resp, err
 	}
 
-	cached, err := b.currentCRL(ctx, s, issuer.ID)
+	config, err := b.crlConfig(ctx, s)
 	if err != nil {
 		return nil, nil, err
-	}
-	if cached != nil && !cached.Dirty && len(cached.DER) > 0 && time.Now().Before(cached.NextUpdate) {
-		return cached, nil, nil
 	}
 
-	entry, err := b.buildCRL(ctx, s, issuer, cached)
+	full, err := b.fullCRLFor(ctx, s, issuer, config)
+	if err != nil {
+		resp, err := issuerError(err)
+		return nil, resp, err
+	}
+	if !delta {
+		return full, nil, nil
+	}
+
+	previous, err := b.currentDeltaCRL(ctx, s, issuer.ID)
 	if err != nil {
 		return nil, nil, err
+	}
+	// A delta whose base is not the list that is served now would be applied to
+	// the wrong one, so it is rebuilt whatever the configuration says. A delta
+	// also follows a revocation on its own: unlike a full list it is cheap to
+	// sign, and an operator who turned auto_rebuild off did so to keep the full
+	// list from moving, not to leave a client without the changes.
+	if previous != nil && previous.BaseNumber == full.Number && len(previous.DER) > 0 {
+		if !previous.Dirty && time.Now().Before(previous.NextUpdate) {
+			return previous, nil, nil
+		}
+	}
+
+	entry, err := b.buildDeltaCRL(ctx, s, issuer, full, previous, config)
+	if err != nil {
+		resp, err := issuerError(err)
+		return nil, resp, err
 	}
 
 	return entry, nil, nil
+}
+
+// fullCRLFor serves the full list of one authority, signing a new one only when
+// there is nothing to serve or the configuration allows a rebuild.
+func (b *backend) fullCRLFor(ctx context.Context, s logical.Storage, issuer *issuerEntry, config *crlConfig) (*crlEntry, error) {
+	cached, err := b.currentCRL(ctx, s, issuer.ID)
+	if err != nil {
+		return nil, err
+	}
+	if cached != nil && len(cached.DER) > 0 {
+		if !config.rebuilds() || (!cached.Dirty && time.Now().Before(cached.NextUpdate)) {
+			return cached, nil
+		}
+	}
+
+	return b.buildCRL(ctx, s, issuer, cached, config)
 }
 
 // crlIssuer resolves the authority whose list is asked for: the one the path
@@ -348,34 +432,50 @@ func (b *backend) crlIssuer(ctx context.Context, s logical.Storage, ref string) 
 	return issuer, nil, nil
 }
 
-// markCRLDirty records that a revocation arrived after the cached list of this
-// issuer was signed. The list itself is rebuilt on the next read, so a revoke
-// does not pay for signing it.
+// markCRLDirty records that a revocation arrived after the cached lists of this
+// issuer were signed. Both are rebuilt on the next read, so a revoke does not
+// pay for a signature nobody asked for.
 func (b *backend) markCRLDirty(ctx context.Context, s logical.Storage, issuerID string) error {
 	entry, err := b.currentCRL(ctx, s, issuerID)
-	if err != nil || entry == nil || entry.Dirty {
+	if err != nil {
 		return err
 	}
+	if entry != nil && !entry.Dirty {
+		entry.Dirty = true
+		if err := putJSON(ctx, s, crlStorePath(issuerID), entry); err != nil {
+			return err
+		}
+	}
 
-	entry.Dirty = true
-	return putJSON(ctx, s, crlPrefix+issuerID, entry)
+	delta, err := b.currentDeltaCRL(ctx, s, issuerID)
+	if err != nil {
+		return err
+	}
+	if delta != nil && !delta.Dirty {
+		delta.Dirty = true
+		if err := putJSON(ctx, s, deltaCRLStorePath(issuerID), delta); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
-// buildCRL signs a new list from every revocation of this issuer and caches it.
-// The number only ever grows, so a client can tell two lists apart; each issuer
-// counts on its own, which keeps the numbering of one from moving the other.
-func (b *backend) buildCRL(ctx context.Context, s logical.Storage, issuer *issuerEntry, previous *crlEntry) (*crlEntry, error) {
+// buildCRL signs a new full list from every revocation of this issuer and caches
+// it. The number only ever grows, so a client can tell two lists apart; each
+// issuer counts on its own, which keeps the numbering of one from moving the
+// other.
+func (b *backend) buildCRL(ctx context.Context, s logical.Storage, issuer *issuerEntry, previous *crlEntry, config *crlConfig) (*crlEntry, error) {
 	if issuer.ID == "" {
 		return nil, fmt.Errorf("the issuer record has no identifier")
 	}
+	if err := issuer.checkUsage(usageCRL, "sign a revocation list"); err != nil {
+		return nil, err
+	}
 
-	number := 1
-	if previous != nil && previous.Number != "" {
-		parsed, err := strconv.Atoi(previous.Number)
-		if err != nil {
-			return nil, fmt.Errorf("the number of the cached CRL, %q, is not a number: %w", previous.Number, err)
-		}
-		number = parsed + 1
+	number, err := nextCRLNumber(previous)
+	if err != nil {
+		return nil, err
 	}
 
 	entries, err := b.crlEntries(ctx, s, issuer.ID)
@@ -391,12 +491,13 @@ func (b *backend) buildCRL(ctx context.Context, s logical.Storage, issuer *issue
 	if err != nil {
 		return nil, err
 	}
+	defer b.closeSigner(signer)
 
 	now := time.Now()
 	template := &smx509.RevocationList{
-		Number:                    big.NewInt(int64(number)),
+		Number:                    big.NewInt(number),
 		ThisUpdate:                now,
-		NextUpdate:                now.Add(crlValidity),
+		NextUpdate:                now.Add(config.lifetime()),
 		RevokedCertificateEntries: entries,
 		SignatureAlgorithm:        smx509.SM2WithSM3,
 	}
@@ -407,21 +508,117 @@ func (b *backend) buildCRL(ctx context.Context, s logical.Storage, issuer *issue
 	}
 
 	entry := &crlEntry{
-		Number:     strconv.Itoa(number),
+		Number:     strconv.FormatInt(number, 10),
 		ThisUpdate: now,
 		NextUpdate: template.NextUpdate,
 		DER:        der,
 	}
-	if err := putJSON(ctx, s, crlPrefix+issuer.ID, entry); err != nil {
+	if err := putJSON(ctx, s, crlStorePath(issuer.ID), entry); err != nil {
 		return nil, err
 	}
 
 	return entry, nil
 }
 
+// buildDeltaCRL signs the changes since the full list it names. The number of a
+// delta follows the number of its base, so the two can be compared, and the
+// indicator extension says which full list a client has to hold to apply it.
+func (b *backend) buildDeltaCRL(ctx context.Context, s logical.Storage, issuer *issuerEntry, full, previous *crlEntry, config *crlConfig) (*crlEntry, error) {
+	if issuer.ID == "" {
+		return nil, fmt.Errorf("the issuer record has no identifier")
+	}
+	if err := issuer.checkUsage(usageCRL, "sign a revocation list"); err != nil {
+		return nil, err
+	}
+
+	base, err := strconv.Atoi(full.Number)
+	if err != nil {
+		return nil, fmt.Errorf("the number of the full list, %q, is not a number: %w", full.Number, err)
+	}
+
+	number := base + 1
+	if previous != nil && previous.Number != "" {
+		parsed, err := strconv.Atoi(previous.Number)
+		if err != nil {
+			return nil, fmt.Errorf("the number of the cached delta, %q, is not a number: %w", previous.Number, err)
+		}
+		if parsed >= number {
+			number = parsed + 1
+		}
+	}
+
+	changes, err := b.deltaCRLEntries(ctx, s, issuer.ID, full.ThisUpdate)
+	if err != nil {
+		return nil, err
+	}
+
+	indicator, err := asn1.Marshal(big.NewInt(int64(base)))
+	if err != nil {
+		return nil, fmt.Errorf("could not encode the base of the delta: %w", err)
+	}
+
+	cert, err := issuer.certificate()
+	if err != nil {
+		return nil, err
+	}
+	signer, err := b.issuerSigner(ctx, s, issuer)
+	if err != nil {
+		return nil, err
+	}
+	defer b.closeSigner(signer)
+
+	now := time.Now()
+	template := &smx509.RevocationList{
+		Number:                    big.NewInt(int64(number)),
+		ThisUpdate:                now,
+		NextUpdate:                now.Add(config.lifetime()),
+		RevokedCertificateEntries: changes,
+		ExtraExtensions: []pkix.Extension{{
+			Id:       oidExtensionDeltaCRLIndicator,
+			Critical: true,
+			Value:    indicator,
+		}},
+		SignatureAlgorithm: smx509.SM2WithSM3,
+	}
+
+	der, err := smx509.CreateRevocationList(rand.Reader, template, cert, signer)
+	if err != nil {
+		return nil, fmt.Errorf("could not create the delta of the certificate revocation list: %w", err)
+	}
+
+	entry := &crlEntry{
+		Number:     strconv.Itoa(number),
+		BaseNumber: full.Number,
+		ThisUpdate: now,
+		NextUpdate: template.NextUpdate,
+		DER:        der,
+	}
+	if err := putJSON(ctx, s, deltaCRLStorePath(issuer.ID), entry); err != nil {
+		return nil, err
+	}
+
+	return entry, nil
+}
+
+// nextCRLNumber is the number of the list that follows one. It only ever grows.
+func nextCRLNumber(previous *crlEntry) (int64, error) {
+	if previous == nil || previous.Number == "" {
+		return 1, nil
+	}
+
+	parsed, err := strconv.ParseInt(previous.Number, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("the number of the cached CRL, %q, is not a number: %w", previous.Number, err)
+	}
+
+	return parsed + 1, nil
+}
+
 // crlEntries turns the revocation records of one issuer into entries of its
 // list. A revocation belongs to the authority that signed the certificate, so a
-// merged list would name serials its own signature says nothing about.
+// merged list would name serials its own signature says nothing about. The
+// reason is carried over as it was recorded; leaving it out would make a
+// compromise look like a certificate that simply ceased to be used.
 func (b *backend) crlEntries(ctx context.Context, s logical.Storage, issuerID string) ([]smx509.RevocationListEntry, error) {
 	names, err := s.List(ctx, revokedPrefix)
 	if err != nil {
@@ -446,10 +643,38 @@ func (b *backend) crlEntries(ctx context.Context, s logical.Storage, issuerID st
 		entries = append(entries, smx509.RevocationListEntry{
 			SerialNumber:   serial,
 			RevocationTime: time.Unix(record.RevocationTime, 0),
+			ReasonCode:     record.Reason,
 		})
 	}
 
 	return entries, nil
+}
+
+// deltaCRLEntries is what changed since a full list was signed: the revocations
+// recorded at or after that moment. A revocation that arrived in the same second
+// as the list appears in both rather than in neither.
+func (b *backend) deltaCRLEntries(ctx context.Context, s logical.Storage, issuerID string, since time.Time) ([]smx509.RevocationListEntry, error) {
+	all, err := b.crlEntries(ctx, s, issuerID)
+	if err != nil {
+		return nil, err
+	}
+
+	moment := since.Truncate(time.Second)
+	changes := make([]smx509.RevocationListEntry, 0, len(all))
+	for _, entry := range all {
+		if !entry.RevocationTime.Before(moment) {
+			changes = append(changes, entry)
+		}
+	}
+
+	return changes, nil
+}
+
+// currentDeltaCRL returns the cached delta of one issuer, or nil when none has
+// been built yet. It needs no legacy path: a mount written before delta lists
+// existed builds one on the first read.
+func (b *backend) currentDeltaCRL(ctx context.Context, s logical.Storage, issuerID string) (*crlEntry, error) {
+	return getJSON[crlEntry](ctx, s, deltaCRLStorePath(issuerID))
 }
 
 const pathCRLHelpSyn = `Read the certificate revocation list`
@@ -458,7 +683,8 @@ const pathCRLHelpDesc = `
 The certificate revocation list of the mount, signed by its authority. The
 signed list is kept as it is and rebuilt when a certificate has been revoked
 since or when it has expired, so two reads of an unchanged list answer with the
-same bytes. Use crl/rotate to force a new list with a new number.
+same bytes. Use crl/rotate to force a new list with a new number, and config/crl
+to say how long a list claims to be current and whether a read may rebuild it.
 `
 
 const pathCRLRotateHelpSyn = `Rebuild the certificate revocation list`
@@ -466,6 +692,28 @@ const pathCRLRotateHelpSyn = `Rebuild the certificate revocation list`
 const pathCRLRotateHelpDesc = `
 Signs a new list with the next number and a fresh validity, whether or not
 anything changed. A client that watches the number sees the rotation.
+`
+
+const pathDeltaCRLHelpSyn = `Read the changes since the last full revocation list`
+
+const pathDeltaCRLHelpDesc = `
+A delta list names only the revocations recorded since the full list it is based
+on, so a client that holds that list catches up without fetching it again. Its
+number follows the number of its base, and the delta CRL indicator extension
+carries that base, so a client can tell which full list the delta applies to.
+
+A delta that is missing, stale, or outdated by a revocation is rebuilt on the
+next read, unless config/crl turns that off. A client that cannot reach a full
+list has nothing to apply a delta to, so publish the full list and offer the
+delta beside it.
+`
+
+const pathDeltaCRLRotateHelpSyn = `Rebuild the changes since the last full list`
+
+const pathDeltaCRLRotateHelpDesc = `
+Signs a new delta with the next number of the delta of this authority, whether or
+not anything changed. The base is the full list as it stands now, which is
+rebuilt first when it has gone stale.
 `
 
 const pathIssuerCRLHelpSyn = `Read the list of one issuer`
@@ -482,3 +730,27 @@ can speak for them. Retiring the authority takes its list away.
 `
 
 const pathIssuerCRLRotateHelpSyn = `Rebuild the list of one issuer`
+
+const pathIssuerCRLRotateHelpDesc = `
+Signs a new list of the named authority with the next number of that authority
+and a fresh validity, whether or not anything changed.
+`
+
+const pathIssuerDeltaCRLHelpSyn = `Read the changes since the last full list of one issuer`
+
+const pathIssuerDeltaCRLHelpDesc = `
+Answers with the delta of one authority, in the same three forms as crl/delta:
+JSON, PEM and DER. The number of the delta follows the number of the full list
+of that authority, and the delta CRL indicator says which list a client has to
+hold to apply it.
+
+A mount that has rotated keeps a delta for the authority it replaced as well,
+because the certificates of that authority keep asking for the list it signed.
+`
+
+const pathIssuerDeltaCRLRotateHelpSyn = `Rebuild the delta of one issuer`
+
+const pathIssuerDeltaCRLRotateHelpDesc = `
+Signs a new delta of the named authority against its full list as it stands now,
+whether or not anything changed.
+`

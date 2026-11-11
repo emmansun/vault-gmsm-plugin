@@ -18,6 +18,7 @@ type requestNames struct {
 	EmailAddresses []string
 	IPAddresses    []net.IP
 	URIs           []*url.URL
+	OtherSANs      []otherSan
 }
 
 // parseAltNames splits a comma separated list into DNS names and email
@@ -176,7 +177,7 @@ func (r *roleEntry) validate(names requestNames) error {
 		}
 	}
 
-	return nil
+	return r.checkOtherSANs(names.OtherSANs)
 }
 
 func (r *roleEntry) checkCommonName(name string) error {

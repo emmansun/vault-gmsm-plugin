@@ -16,10 +16,12 @@ Two [HashiCorp Vault](https://www.vaultproject.io/) plugins for the ShangMi (SM,
   so existing transit tooling, policies and client libraries carry over with the
   mount path changed.
 - **`pki-gmsm`** — a certificate authority for the same algorithms: it generates
-  SM2 keys, signs X.509 certificates with `SM2WithSM3`, publishes a CRL and
-  answers OCSP status queries. It is a mount type of its own, because Vault
-  binds one plugin to one mount and because the lifecycle of a CA has nothing
-  in common with that of a transit key.
+  SM2 keys, signs X.509 certificates with `SM2WithSM3`, publishes a CRL and delta
+  CRLs and answers OCSP status queries. The key can stay in the mount, or remain
+  in an HSM or a key management service and be reached through a signer provider
+  the plugin is built with. It is a mount type of its own, because Vault binds
+  one plugin to one mount and because the lifecycle of a CA has nothing in
+  common with that of a transit key.
 
 ## Capabilities
 
@@ -28,7 +30,7 @@ Two [HashiCorp Vault](https://www.vaultproject.io/) plugins for the ShangMi (SM,
 | `gmsm` | `sm4-gcm96` (default) | Encrypt, decrypt, rewrap, data keys, key derivation, convergent encryption, associated data |
 | `gmsm` | `sm2` | Encrypt, decrypt, rewrap, data keys, sign, verify, certificate requests |
 | `gmsm` | `hmac` | HMAC-SM3 only, with a key size between 32 and 512 bytes |
-| `pki-gmsm` | `sm2` | Root and intermediate authorities, rotation and import, roles with a name policy, issue, sign, revoke, CRL, OCSP, tidy |
+| `pki-gmsm` | `sm2` | Root and intermediate authorities, rotation and import, roles with a name policy, issue, sign, revoke, CRL and delta CRL, OCSP, tidy, an external signer for the authority key |
 
 HMAC-SM3 is available on every key version regardless of type, so an `sm2` key
 can also produce and verify HMACs. The older type name `ecdsa-sm2` is still

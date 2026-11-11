@@ -34,8 +34,13 @@ type roleEntry struct {
 	TTL               time.Duration `json:"ttl"`
 	MaxTTL            time.Duration `json:"max_ttl"`
 	NotBeforeDuration time.Duration `json:"not_before_duration"`
-	NoStore           bool          `json:"no_store"`
-	GenerateLease     bool          `json:"generate_lease"`
+
+	// NotAfter is the latest time a certificate of this role may be valid
+	// until, and zero when the role sets no deadline of its own.
+	NotAfter time.Time `json:"not_after"`
+
+	NoStore       bool `json:"no_store"`
+	GenerateLease bool `json:"generate_lease"`
 
 	Organization        []string `json:"organization"`
 	OU                  []string `json:"ou"`
@@ -57,7 +62,12 @@ type roleEntry struct {
 	EnforceHostnames          bool     `json:"enforce_hostnames"`
 	AllowIPSANs               bool     `json:"allow_ip_sans"`
 	AllowedURISANs            []string `json:"allowed_uri_sans"`
+	AllowedOtherSANs          []string `json:"allowed_other_sans"`
 	CNValidations             []string `json:"cn_validations"`
+
+	// PolicyIdentifiers are the certificate policies a certificate of this
+	// role states, as dotted decimal OIDs.
+	PolicyIdentifiers []string `json:"policy_identifiers"`
 
 	KeyUsage        []string `json:"key_usage"`
 	ExtKeyUsage     []string `json:"ext_key_usage"`
@@ -186,16 +196,35 @@ var extKeyUsageNames = map[string]smx509.ExtKeyUsage{
 	"ocspsigning":     smx509.ExtKeyUsageOCSPSigning,
 }
 
+// policyIdentifiers converts the policies of a role to the form a certificate
+// carries. A role that names none issues a certificate that states none.
+func (r *roleEntry) policyIdentifiers() ([]asn1.ObjectIdentifier, error) {
+	identifiers := make([]asn1.ObjectIdentifier, 0, len(r.PolicyIdentifiers))
+	for _, raw := range r.PolicyIdentifiers {
+		oid, err := parseOID(raw)
+		if err != nil {
+			return nil, fmt.Errorf("policy_identifiers: %w", err)
+		}
+		identifiers = append(identifiers, oid)
+	}
+
+	return identifiers, nil
+}
+
 // parseOID turns the dotted decimal form into the identifier the certificate
 // carries, so a bad value is refused when the role is written rather than when
 // a certificate is requested.
 func parseOID(raw string) (asn1.ObjectIdentifier, error) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
-		return nil, errors.New("an extended key usage OID is empty")
+		return nil, errors.New("an object identifier is empty")
 	}
 
 	parts := strings.Split(trimmed, ".")
+	if len(parts) < 2 {
+		return nil, fmt.Errorf("%q is not a dotted decimal OID", raw)
+	}
+
 	oid := make(asn1.ObjectIdentifier, len(parts))
 	for i, part := range parts {
 		value, err := strconv.Atoi(part)
@@ -230,6 +259,14 @@ func roleFieldSchemas() map[string]*framework.FieldSchema {
 			Type:        framework.TypeDurationSecond,
 			Default:     int(defaultNotBefore / time.Second),
 			Description: "How far the notBefore field is backdated. It does not extend the validity.",
+		},
+		"not_after": {
+			Type:        framework.TypeTime,
+			Description: "Latest time a certificate of this role may be valid until, in RFC 3339 form. A longer validity is shortened to it, and a request made after it is refused.",
+		},
+		"policy_identifiers": {
+			Type:        framework.TypeCommaStringSlice,
+			Description: "Certificate policies the certificate states, as dotted decimal OIDs.",
 		},
 		"no_store": {
 			Type:        framework.TypeBool,
@@ -326,6 +363,10 @@ func roleFieldSchemas() map[string]*framework.FieldSchema {
 			Type:        framework.TypeCommaStringSlice,
 			Description: "URI subject alternative names this role may issue. Entries may contain glob patterns.",
 		},
+		"allowed_other_sans": {
+			Type:        framework.TypeCommaStringSlice,
+			Description: `Other subject alternative names this role may issue, as OID;form:value entries with glob patterns allowed, e.g. "1.3.6.1.4.1.311.20.2.3;utf8:department" or "1.3.6.1.4.1.311.20.2.3;utf8:*".`,
+		},
 		"cn_validations": {
 			Type:        framework.TypeCommaStringSlice,
 			Default:     []string{"email", "hostname"},
@@ -393,6 +434,12 @@ func applyRoleFields(role *roleEntry, d *framework.FieldData) {
 	if _, ok := d.Raw["not_before_duration"]; ok {
 		role.NotBeforeDuration = time.Duration(d.Get("not_before_duration").(int)) * time.Second
 	}
+	if _, ok := d.Raw["not_after"]; ok {
+		role.NotAfter = d.Get("not_after").(time.Time)
+	}
+	if _, ok := d.Raw["policy_identifiers"]; ok {
+		role.PolicyIdentifiers = d.Get("policy_identifiers").([]string)
+	}
 	if _, ok := d.Raw["no_store"]; ok {
 		role.NoStore = d.Get("no_store").(bool)
 	}
@@ -456,6 +503,9 @@ func applyRoleFields(role *roleEntry, d *framework.FieldData) {
 	if _, ok := d.Raw["allowed_uri_sans"]; ok {
 		role.AllowedURISANs = d.Get("allowed_uri_sans").([]string)
 	}
+	if _, ok := d.Raw["allowed_other_sans"]; ok {
+		role.AllowedOtherSANs = d.Get("allowed_other_sans").([]string)
+	}
 	if _, ok := d.Raw["cn_validations"]; ok {
 		role.CNValidations = d.Get("cn_validations").([]string)
 	}
@@ -518,6 +568,18 @@ func validateRole(role *roleEntry) error {
 		}
 	}
 
+	if _, err := role.policyIdentifiers(); err != nil {
+		return err
+	}
+
+	// A pattern is parsed here for the same reason: a role that can never match
+	// what a request writes refuses every request, and that is better said now.
+	for _, pattern := range role.AllowedOtherSANs {
+		if _, err := parseOtherSAN(strings.TrimSpace(pattern)); err != nil {
+			return fmt.Errorf("allowed_other_sans: %w", err)
+		}
+	}
+
 	if _, err := role.keyUsage(); err != nil {
 		return err
 	}
@@ -535,6 +597,7 @@ func roleData(role *roleEntry) map[string]interface{} {
 		"ttl":                         int64(role.TTL / time.Second),
 		"max_ttl":                     int64(role.MaxTTL / time.Second),
 		"not_before_duration":         int64(role.NotBeforeDuration / time.Second),
+		"not_after":                   role.NotAfter,
 		"no_store":                    role.NoStore,
 		"generate_lease":              role.GenerateLease,
 		"organization":                role.Organization,
@@ -556,7 +619,9 @@ func roleData(role *roleEntry) map[string]interface{} {
 		"enforce_hostnames":           role.EnforceHostnames,
 		"allow_ip_sans":               role.AllowIPSANs,
 		"allowed_uri_sans":            role.AllowedURISANs,
+		"allowed_other_sans":          role.AllowedOtherSANs,
 		"cn_validations":              role.CNValidations,
+		"policy_identifiers":          role.PolicyIdentifiers,
 		"key_usage":                   role.KeyUsage,
 		"ext_key_usage":               role.ExtKeyUsage,
 		"ext_key_usage_oids":          role.ExtKeyUsageOIDs,

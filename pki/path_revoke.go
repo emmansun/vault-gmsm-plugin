@@ -2,6 +2,7 @@ package pki
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -27,6 +28,15 @@ func (b *backend) pathRevoke() *framework.Path {
 				Type:        framework.TypeString,
 				Description: "Serial number of the certificate to revoke, in hexadecimal with or without colons.",
 			},
+			"certificate": {
+				Type:        framework.TypeString,
+				Description: "PEM certificate to revoke, as an alternative to serial_number. The serial is taken from it.",
+			},
+			"revocation_reason": {
+				Type:        framework.TypeInt,
+				Default:     0,
+				Description: "Reason code of RFC 5280 for the revocation: 0 unspecified, 1 keyCompromise, 2 cACompromise, 3 affiliationChanged, 4 superseded, 5 cessationOfOperation, 6 certificateHold, 8 removeFromCRL, 9 privilegeWithdrawn, 10 aACompromise.",
+			},
 		},
 
 		Callbacks: map[logical.Operation]framework.OperationFunc{
@@ -39,13 +49,13 @@ func (b *backend) pathRevoke() *framework.Path {
 }
 
 func (b *backend) pathRevokeWrite(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
-	raw := strings.TrimSpace(d.Get("serial_number").(string))
-	if raw == "" {
-		return logical.ErrorResponse("serial_number is required"), logical.ErrInvalidRequest
+	serial, err := serialToRevoke(d)
+	if err != nil {
+		return logical.ErrorResponse(err.Error()), logical.ErrInvalidRequest
 	}
 
-	serial, err := normalizeSerial(raw)
-	if err != nil {
+	reason := d.Get("revocation_reason").(int)
+	if err := checkRevocationReason(reason); err != nil {
 		return logical.ErrorResponse(err.Error()), logical.ErrInvalidRequest
 	}
 
@@ -86,6 +96,7 @@ func (b *backend) pathRevokeWrite(ctx context.Context, req *logical.Request, d *
 			Data: map[string]interface{}{
 				"revocation_time":         existing.RevocationTime,
 				"revocation_time_rfc3339": existing.RFC3339,
+				"revocation_reason":       existing.Reason,
 			},
 			Warnings: []string{fmt.Sprintf("certificate with serial number %s is already revoked", formatSerial(serial))},
 		}, nil
@@ -96,6 +107,7 @@ func (b *backend) pathRevokeWrite(ctx context.Context, req *logical.Request, d *
 		IssuerID:       issuerID,
 		RevocationTime: now.Unix(),
 		RFC3339:        now.Format(time.RFC3339),
+		Reason:         reason,
 	}
 	if !record.Expiration.IsZero() {
 		revocation.Expiration = record.Expiration.Unix()
@@ -111,14 +123,54 @@ func (b *backend) pathRevokeWrite(ctx context.Context, req *logical.Request, d *
 	return &logical.Response{Data: map[string]interface{}{
 		"revocation_time":         revocation.RevocationTime,
 		"revocation_time_rfc3339": revocation.RFC3339,
+		"revocation_reason":       revocation.Reason,
 	}}, nil
+}
+
+// serialToRevoke reads the serial to revoke from whichever of the two forms the
+// caller supplied. A caller that supplies both is refused rather than guessed
+// at: the two may name different certificates.
+func serialToRevoke(d *framework.FieldData) (string, error) {
+	rawSerial := strings.TrimSpace(d.Get("serial_number").(string))
+	rawCertificate := strings.TrimSpace(d.Get("certificate").(string))
+
+	switch {
+	case rawSerial != "" && rawCertificate != "":
+		return "", errors.New("supply serial_number or certificate, not both")
+	case rawSerial != "":
+		return normalizeSerial(rawSerial)
+	case rawCertificate == "":
+		return "", errors.New("serial_number or certificate is required")
+	}
+
+	certs, err := parseCertificates(rawCertificate)
+	if err != nil {
+		return "", err
+	}
+
+	return serialHex(certs[0].SerialNumber), nil
+}
+
+// checkRevocationReason refuses a code that RFC 5280 does not define. Reason 7
+// was never assigned, and a list that carries it is read differently by every
+// client that meets one.
+func checkRevocationReason(code int) error {
+	switch code {
+	case 0, 1, 2, 3, 4, 5, 6, 8, 9, 10:
+		return nil
+	default:
+		return fmt.Errorf("revocation_reason %d is not a reason code of RFC 5280", code)
+	}
 }
 
 const pathRevokeHelpSyn = `Revoke a certificate the mount issued`
 
 const pathRevokeHelpDesc = `
-Marks a serial number as revoked. The certificate stays where it is; the
-revocation appears in the next certificate revocation list. Revoking a serial
-that is already revoked answers with the existing revocation and changes
-nothing, so a retry is safe.
+Marks a certificate as revoked, by serial number or by the certificate itself.
+The certificate stays where it is; the revocation appears in the next
+certificate revocation list, together with the reason it was given.
+
+Revoking a serial that is already revoked answers with the existing revocation
+and changes nothing, so a retry is safe. The reason of the first revocation is
+the one that stays.
 `

@@ -111,6 +111,9 @@ func (b *backend) answerOCSP(ctx context.Context, req *logical.Request, encoded 
 		return b.ocspFailure(http.StatusUnauthorized, ocspUnauthorized,
 			errors.New("no authority of this mount signed the certificate the request names"))
 	}
+	if err := issuer.checkUsage(usageOCSP, "answer status queries"); err != nil {
+		return b.ocspFailure(http.StatusUnauthorized, ocspUnauthorized, err)
+	}
 
 	body, err := b.signOCSPResponse(ctx, req.Storage, issuer, request)
 	if err != nil {
@@ -196,13 +199,19 @@ func (b *backend) signOCSPResponse(ctx context.Context, s logical.Storage, issue
 	if err != nil {
 		return nil, err
 	}
+	defer b.closeSigner(signer)
 
 	answer, err := b.ocspStatus(ctx, s, issuer, request.certID.SerialNumber)
 	if err != nil {
 		return nil, err
 	}
 
-	return signOCSPResponse(request.certID, cert, signer, answer)
+	config, err := b.crlConfig(ctx, s)
+	if err != nil {
+		return nil, err
+	}
+
+	return signOCSPResponse(request.certID, cert, signer, answer, config.ocspLifetime())
 }
 
 // ocspStatus says what the mount knows about one serial. The certificate record
@@ -233,7 +242,7 @@ func (b *backend) ocspStatus(ctx context.Context, s logical.Storage, issuer *iss
 		return ocspAnswer{status: ocspGood}, nil
 	}
 
-	return ocspAnswer{status: ocspRevoked, revokedAt: time.Unix(revocation.RevocationTime, 0)}, nil
+	return ocspAnswer{status: ocspRevoked, revokedAt: time.Unix(revocation.RevocationTime, 0), reason: revocation.Reason}, nil
 }
 
 const pathOCSPHelpSyn = `Ask whether a certificate this mount issued is still good`

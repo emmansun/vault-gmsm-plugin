@@ -517,10 +517,16 @@ jobs:
         expect "the listing holds the serial" "$leaf_serial" \
           "$(vault list -format=json "$PKI_MOUNT/certs" | jq -r '.[0]')"
 
-        # Revocation is recorded on the certificate and reaches the CRL.
-        vault write "$PKI_MOUNT/revoke" serial_number="$leaf_serial" > /dev/null
+        # Revocation is recorded on the certificate and reaches the CRL. The
+        # reason is part of what is recorded, because a client that sees a
+        # compromise acts on it while a superseded certificate is only replaced.
+        vault write "$PKI_MOUNT/revoke" serial_number="$leaf_serial" revocation_reason=1 > /dev/null
         revoked=$(vault read -field=revocation_time "$PKI_MOUNT/cert/$leaf_serial")
         [ "${revoked:-0}" -gt 0 ] || fail "the revoked certificate reports revocation_time '$revoked'"
+        expect "cert/:serial reports the reason" 1 \
+          "$(vault read -field=revocation_reason "$PKI_MOUNT/cert/$leaf_serial")"
+        expect "the listing names the revoked serial" "$leaf_serial" \
+          "$(vault list -format=json "$PKI_MOUNT/certs/revoked" | jq -r '.[0]')"
 
         # The answer of the responder follows the revocation, and the GET form
         # carries the encoding in the path.
@@ -528,8 +534,8 @@ jobs:
         curl -fsS -o "$RUNNER_TEMP/ocsp-revoked.der" \
           "$VAULT_ADDR/v1/$PKI_MOUNT/ocsp/$ocsp_encoded" \
           || fail "the responder did not answer a request in the path"
-        go run ./scripts/ci/pkicheck -response -ca "$RUNNER_TEMP/ca.pem" -status revoked \
-          < "$RUNNER_TEMP/ocsp-revoked.der" || fail "the responder does not report the revocation"
+        go run ./scripts/ci/pkicheck -response -ca "$RUNNER_TEMP/ca.pem" -status revoked -reason 1 \
+          < "$RUNNER_TEMP/ocsp-revoked.der" || fail "the responder does not report the revocation with its reason"
 
         crl_number=$(vault read -field=number "$PKI_MOUNT/crl")
         curl -fsS -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/$PKI_MOUNT/crl/pem" \
@@ -554,6 +560,12 @@ jobs:
         vault read -format=json "$PKI_MOUNT/config/urls" > "$RUNNER_TEMP/urls.json"
         grep -qF "$VAULT_ADDR/v1/$PKI_MOUNT/crl" "$RUNNER_TEMP/urls.json" \
           || fail "config/urls did not keep the distribution point: $(cat "$RUNNER_TEMP/urls.json")"
+
+        # How long an answer holds is a setting rather than a constant, so it is
+        # written and read back before the answer that depends on it is asked for.
+        vault write "$PKI_MOUNT/config/crl" ocsp_expiry=1h > /dev/null
+        expect "config/crl keeps the lifetime of an answer" 1h0m0s \
+          "$(vault read -field=ocsp_expiry "$PKI_MOUNT/config/crl")"
 
         # Tidy drops expired state only, so the live certificate stays readable.
         vault write "$PKI_MOUNT/tidy" safety_buffer=1s > /dev/null
@@ -586,8 +598,8 @@ jobs:
         curl -fsS -H "X-Vault-Token: $VAULT_TOKEN" \
           "$VAULT_ADDR/v1/$PKI_MOUNT/issuer/$previous_id/crl/pem" > "$RUNNER_TEMP/previous-crl.pem"
         go run ./scripts/ci/pkicheck -crl "$RUNNER_TEMP/previous-crl.pem" \
-          -ca "$RUNNER_TEMP/previous-ca.pem" -serial "$leaf_serial" \
-          || fail "the list of the previous authority does not name the revoked certificate"
+          -ca "$RUNNER_TEMP/previous-ca.pem" -serial "$leaf_serial" -reason 1 \
+          || fail "the list of the previous authority does not name the revoked certificate with its reason"
 
         curl -fsS -H "X-Vault-Token: $VAULT_TOKEN" \
           "$VAULT_ADDR/v1/$PKI_MOUNT/crl/pem" > "$RUNNER_TEMP/current-crl.pem"

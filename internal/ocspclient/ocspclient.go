@@ -122,6 +122,11 @@ type Response struct {
 	CertStatus CertStatus
 	Serial     *big.Int
 	RevokedAt  time.Time
+
+	// RevocationReason is the code of RFC 5280 the certificate was revoked
+	// with, and zero when the responder did not state one.
+	RevocationReason int
+
 	ProducedAt time.Time
 	ThisUpdate time.Time
 	NextUpdate time.Time
@@ -239,12 +244,14 @@ func (r *Response) readStatus(status asn1.RawValue) error {
 	case 1:
 		r.CertStatus = CertRevoked
 		var info struct {
-			Time time.Time `asn1:"generalized"`
+			Time   time.Time       `asn1:"generalized"`
+			Reason asn1.Enumerated `asn1:"explicit,tag:0,optional"`
 		}
 		if _, err := asn1.Unmarshal(status.Bytes, &info); err != nil {
 			return fmt.Errorf("could not read the time of the revocation: %w", err)
 		}
 		r.RevokedAt = info.Time
+		r.RevocationReason = int(info.Reason)
 	case 2:
 		r.CertStatus = CertUnknown
 	default:

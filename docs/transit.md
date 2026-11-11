@@ -13,21 +13,23 @@ Installation and a quick start are in the [README](../README.md).
 
 ## Contents
 
-- [Key types](#key-types)
-  - [`sm4-gcm96`](#sm4-gcm96)
-  - [`sm2`](#sm2)
-- [Endpoint reference](#endpoint-reference)
-  - [Creating keys](#creating-keys)
-  - [Key configuration](#key-configuration)
-  - [Encryption](#encryption)
-  - [Data keys](#data-keys)
-  - [Signing and verification](#signing-and-verification)
-  - [Hashing and HMAC](#hashing-and-hmac)
-  - [Export](#export)
-- [Certificates](#certificates)
-- [Importing keys](#importing-keys)
-- [Differences from Vault transit](#differences-from-vault-transit)
-- [Not implemented](#not-implemented)
+- [Transit engine reference](#transit-engine-reference)
+  - [Contents](#contents)
+  - [Key types](#key-types)
+    - [`sm4-gcm96`](#sm4-gcm96)
+    - [`sm2`](#sm2)
+  - [Endpoint reference](#endpoint-reference)
+    - [Creating keys](#creating-keys)
+    - [Key configuration](#key-configuration)
+    - [Encryption](#encryption)
+    - [Data keys](#data-keys)
+    - [Signing and verification](#signing-and-verification)
+    - [Hashing and HMAC](#hashing-and-hmac)
+    - [Export](#export)
+  - [Certificates](#certificates)
+  - [Importing keys](#importing-keys)
+  - [Differences from Vault transit](#differences-from-vault-transit)
+  - [Not implemented](#not-implemented)
 
 ## Key types
 

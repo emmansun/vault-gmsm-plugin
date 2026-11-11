@@ -228,11 +228,13 @@ func parseCertificateRequest(raw string) (*smx509.CertificateRequest, error) {
 	return csr, nil
 }
 
-// parseAuthorityBundle reads a private key and its certificate from one PEM
-// bundle, which is how an authority created elsewhere is adopted. The
-// certificate has to carry the public key of the key in the bundle, and the
-// chain has to sign in order: a mount that stores a mismatched pair can only
-// fail later, when a certificate is requested.
+// parseAuthorityBundle reads an authority created elsewhere from one PEM bundle:
+// at least its certificate and the certificates above it, and optionally its
+// private key. A bundle without a key belongs to an authority whose key is held
+// in an appliance, which the caller then has to name. The certificate has to
+// carry the public key of the key in the bundle, and the chain has to sign in
+// order: a mount that stores a mismatched pair can only fail later, when a
+// certificate is requested.
 func parseAuthorityBundle(pemText string) (*sm2.PrivateKey, []*smx509.Certificate, error) {
 	var (
 		key   *sm2.PrivateKey
@@ -273,23 +275,20 @@ func parseAuthorityBundle(pemText string) (*sm2.PrivateKey, []*smx509.Certificat
 		}
 	}
 
-	if key == nil {
-		return nil, nil, errors.New("the bundle carries no private key")
-	}
 	if len(certs) == 0 {
 		return nil, nil, errors.New("the bundle carries no certificate")
 	}
 
 	leaf := certs[0]
+	if !leaf.IsCA {
+		return nil, nil, errors.New("the certificate is not a certificate authority")
+	}
 	publicKey, err := checkSM2PublicKey(leaf.PublicKey)
 	if err != nil {
 		return nil, nil, err
 	}
-	if !publicKey.Equal(&key.PublicKey) {
+	if key != nil && !publicKey.Equal(&key.PublicKey) {
 		return nil, nil, errors.New("the certificate does not carry the public key of the private key in the bundle")
-	}
-	if !leaf.IsCA {
-		return nil, nil, errors.New("the certificate is not a certificate authority")
 	}
 
 	for i := 0; i+1 < len(certs); i++ {
@@ -491,9 +490,22 @@ type certificateRequest struct {
 	// UnknownExtKeyUsage carries the usages the role names by OID.
 	UnknownExtKeyUsage []asn1.ObjectIdentifier
 
+	// PolicyIdentifiers are the certificate policies the certificate states.
+	PolicyIdentifiers []asn1.ObjectIdentifier
+
+	// OtherSANs are the otherName entries of the subject alternative names.
+	OtherSANs []otherSan
+
+	// NameConstraints restricts the names an intermediate may vouch for.
+	NameConstraints nameConstraints
+
 	IsCA       bool
 	MaxPathLen int
 	TTL        time.Duration
+
+	// NotAfter is the latest time the certificate may be valid until, and zero
+	// when the caller sets no limit of its own.
+	NotAfter time.Time
 
 	// NotBefore is how far the notBefore field is backdated. A zero value
 	// falls back to defaultNotBefore.
@@ -548,16 +560,33 @@ func (b *backend) rootCertificate(ctx context.Context, s logical.Storage, subjec
 	return smx509.ParseCertificate(der)
 }
 
+// leafExpiryError marks a certificate an authority refuses to sign because it
+// would outlive it. It is a mistake in the request rather than a failure of the
+// mount, so paths answer with it as a 400.
+type leafExpiryError struct {
+	until   time.Time
+	expires time.Time
+	issuer  *issuerEntry
+}
+
+func (e *leafExpiryError) Error() string {
+	return fmt.Sprintf("the certificate would be valid until %s, past issuer %s, which expires %s; write leaf_not_after_behavior=permit on that issuer to allow it",
+		e.until.UTC().Format(time.RFC3339), issuerLabel(e.issuer.ID, e.issuer), e.expires.UTC().Format(time.RFC3339))
+}
+
 // signWithIssuer issues one certificate from the mount's authority. The TTL is
 // clamped to what the authority has left, and the clamp is reported so the
 // caller can pass the warning on instead of silently shortening a certificate.
-func (b *backend) signWithIssuer(ctx context.Context, s logical.Storage, issuer *issuerEntry, signer *sm2.PrivateKey, request certificateRequest) (*smx509.Certificate, []string, error) {
+func (b *backend) signWithIssuer(ctx context.Context, s logical.Storage, issuer *issuerEntry, signer issuerKey, request certificateRequest) (*smx509.Certificate, []string, error) {
 	issuerCert, err := issuer.certificate()
 	if err != nil {
 		return nil, nil, err
 	}
+	if err := issuer.checkUsage(usageIssuing, "issue certificates"); err != nil {
+		return nil, nil, err
+	}
 
-	urls, err := b.urls(ctx, s)
+	urls, err := b.urlsFor(ctx, s, issuer)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -571,9 +600,29 @@ func (b *backend) signWithIssuer(ctx context.Context, s logical.Storage, issuer 
 	}
 
 	ttl := request.TTL
+	if !request.NotAfter.IsZero() {
+		// The role may say when a certificate of its own has to be gone, and
+		// that is a deadline rather than a longer validity: a request that asks
+		// for more is shortened to it, and one made after it is refused.
+		if !now.Before(request.NotAfter) {
+			return nil, nil, errors.New("the not_after of the role has passed")
+		}
+		if now.Add(ttl).After(request.NotAfter) {
+			ttl = request.NotAfter.Sub(now)
+			warnings = append(warnings, "the requested TTL was shortened to the not_after of the role")
+		}
+	}
 	if !issuerCert.NotAfter.IsZero() && now.Add(ttl).After(issuerCert.NotAfter) {
-		ttl = issuerCert.NotAfter.Sub(now)
-		warnings = append(warnings, "the requested TTL was shortened to the remaining validity of the certificate authority")
+		switch issuer.leafBehavior() {
+		case leafNotAfterPermit:
+			// The operator asked for certificates that outlive the authority,
+			// which is the one way a leaf can be valid past its issuer.
+		case leafNotAfterErr:
+			return nil, nil, &leafExpiryError{until: now.Add(ttl), expires: issuerCert.NotAfter, issuer: issuer}
+		default:
+			ttl = issuerCert.NotAfter.Sub(now)
+			warnings = append(warnings, "the requested TTL was shortened to the remaining validity of the certificate authority")
+		}
 	}
 	if ttl <= 0 {
 		return nil, nil, errors.New("the certificate authority has expired")
@@ -585,6 +634,11 @@ func (b *backend) signWithIssuer(ctx context.Context, s logical.Storage, issuer 
 	}
 
 	identifier, err := subjectKeyID(request.PublicKey)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	extensions, err := certificateExtensions(request)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -607,11 +661,21 @@ func (b *backend) signWithIssuer(ctx context.Context, s logical.Storage, issuer 
 		IssuingCertificateURL: urls.IssuingCertificates,
 		CRLDistributionPoints: urls.CRLDistributionPoints,
 		OCSPServer:            urls.OCSPServers,
+		ExtraExtensions:       extensions,
 		SignatureAlgorithm:    smx509.SM2WithSM3,
 	}
 	if request.IsCA && request.MaxPathLen >= 0 {
 		template.MaxPathLen = request.MaxPathLen
 		template.MaxPathLenZero = request.MaxPathLen == 0
+	}
+	if !request.NameConstraints.empty() {
+		template.PermittedDNSDomains = request.NameConstraints.PermittedDNSDomains
+		template.ExcludedDNSDomains = request.NameConstraints.ExcludedDNSDomains
+		template.PermittedIPRanges = request.NameConstraints.PermittedIPRanges
+		template.ExcludedIPRanges = request.NameConstraints.ExcludedIPRanges
+		// RFC 5280 has the CA state what it vouches for, and a client that does
+		// not understand a constraint must not accept the certificates below it.
+		template.PermittedDNSDomainsCritical = true
 	}
 
 	der, err := smx509.CreateCertificate(rand.Reader, template, issuerCert, request.PublicKey, signer)

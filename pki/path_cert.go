@@ -72,6 +72,7 @@ func (b *backend) pathCertRead(ctx context.Context, req *logical.Request, d *fra
 	if revocation != nil {
 		data["revocation_time"] = revocation.RevocationTime
 		data["revocation_time_rfc3339"] = revocation.RFC3339
+		data["revocation_reason"] = revocation.Reason
 	}
 
 	return &logical.Response{Data: data}, nil
@@ -110,6 +111,43 @@ func (b *backend) pathCertsListRead(ctx context.Context, req *logical.Request, _
 	return logical.ListResponse(display), nil
 }
 
+// pathCertsRevoked lists the serials the mount revoked, whichever authority
+// signed them. It is the other half of what certs answers: a reconciliation
+// against a database of subscribers needs both, because a serial that is
+// revoked but never listed is a certificate nobody looked for.
+func (b *backend) pathCertsRevoked() *framework.Path {
+	return &framework.Path{
+		Pattern: "certs/revoked$",
+
+		DisplayAttrs: &framework.DisplayAttributes{
+			OperationPrefix: operationPrefix + "-certs",
+			OperationVerb:   "list",
+			OperationSuffix: "revoked",
+		},
+
+		Callbacks: map[logical.Operation]framework.OperationFunc{
+			logical.ListOperation: b.pathCertsRevokedRead,
+		},
+
+		HelpSynopsis:    pathCertsRevokedHelpSyn,
+		HelpDescription: pathCertsRevokedHelpDesc,
+	}
+}
+
+func (b *backend) pathCertsRevokedRead(ctx context.Context, req *logical.Request, _ *framework.FieldData) (*logical.Response, error) {
+	serials, err := req.Storage.List(ctx, revokedPrefix)
+	if err != nil {
+		return nil, err
+	}
+
+	display := make([]string, len(serials))
+	for i, serial := range serials {
+		display[i] = formatSerial(serial)
+	}
+
+	return logical.ListResponse(display), nil
+}
+
 const pathCertHelpSyn = `Read a certificate the mount issued`
 
 const pathCertHelpDesc = `
@@ -124,4 +162,12 @@ const pathCertsListHelpSyn = `List the serials of the certificates the mount iss
 const pathCertsListHelpDesc = `
 Lists the serial number of every certificate the mount kept, in the
 colon-separated form that cert/:serial accepts.
+`
+
+const pathCertsRevokedHelpSyn = `List the serials the mount revoked`
+
+const pathCertsRevokedHelpDesc = `
+Lists the serial number of every certificate that was revoked, in the
+colon-separated form that cert/:serial accepts, including the serials of the
+certificates the mount did not keep.
 `
