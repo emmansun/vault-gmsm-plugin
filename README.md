@@ -1,5 +1,7 @@
 # Vault GMSM Plugin
 
+English | [简体中文](README.zh-CN.md)
+
 [![CI](https://github.com/emmansun/vault-gmsm-plugin/actions/workflows/ci.yml/badge.svg)](https://github.com/emmansun/vault-gmsm-plugin/actions/workflows/ci.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/emmansun/vault-gmsm-plugin.svg)](https://pkg.go.dev/github.com/emmansun/vault-gmsm-plugin)
 [![Go version](https://img.shields.io/github/go-mod/go-version/emmansun/vault-gmsm-plugin)](go.mod)

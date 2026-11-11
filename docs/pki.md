@@ -1,5 +1,7 @@
 # Certificate authority plugin (`pki-gmsm`)
 
+English | [简体中文](pki.zh-CN.md)
+
 `pki-gmsm` is a certificate authority, not a transit engine: it generates SM2
 keys, signs X.509 certificates with `SM2WithSM3`, publishes a CRL and answers
 OCSP status queries. It is a mount type of its own, because Vault binds one

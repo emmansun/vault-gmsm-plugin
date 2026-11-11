@@ -1,5 +1,7 @@
 # Operations
 
+English | [简体中文](operations.zh-CN.md)
+
 Running, installing and building the two plugins. The feature references are
 [transit](transit.md) and [certificate authority](pki.md).
 

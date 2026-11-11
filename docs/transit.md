@@ -1,5 +1,7 @@
 # Transit engine reference
 
+English | [简体中文](transit.zh-CN.md)
+
 The `gmsm` mount is a transit secrets engine for SM4-GCM encryption and SM2
 signing. Keys are generated inside Vault, or imported from material you already
 hold, and never leave the mount unless the key is marked exportable.
