@@ -16,10 +16,10 @@ Two [HashiCorp Vault](https://www.vaultproject.io/) plugins for the ShangMi (SM,
   so existing transit tooling, policies and client libraries carry over with the
   mount path changed.
 - **`pki-gmsm`** — a certificate authority for the same algorithms: it generates
-  SM2 keys, signs X.509 certificates with `SM2WithSM3` and publishes a CRL. It
-  is a mount type of its own, because Vault binds one plugin to one mount and
-  because the lifecycle of a CA has nothing in common with that of a transit
-  key.
+  SM2 keys, signs X.509 certificates with `SM2WithSM3`, publishes a CRL and
+  answers OCSP status queries. It is a mount type of its own, because Vault
+  binds one plugin to one mount and because the lifecycle of a CA has nothing
+  in common with that of a transit key.
 
 ## Capabilities
 
@@ -28,7 +28,7 @@ Two [HashiCorp Vault](https://www.vaultproject.io/) plugins for the ShangMi (SM,
 | `gmsm` | `sm4-gcm96` (default) | Encrypt, decrypt, rewrap, data keys, key derivation, convergent encryption, associated data |
 | `gmsm` | `sm2` | Encrypt, decrypt, rewrap, data keys, sign, verify, certificate requests |
 | `gmsm` | `hmac` | HMAC-SM3 only, with a key size between 32 and 512 bytes |
-| `pki-gmsm` | `sm2` | Root and intermediate authorities, rotation and import, roles with a name policy, issue, sign, revoke, CRL, tidy |
+| `pki-gmsm` | `sm2` | Root and intermediate authorities, rotation and import, roles with a name policy, issue, sign, revoke, CRL, OCSP, tidy |
 
 HMAC-SM3 is available on every key version regardless of type, so an `sm2` key
 can also produce and verify HMACs. The older type name `ecdsa-sm2` is still
@@ -128,7 +128,7 @@ $ vault write pki-gmsm/issue/web common_name=web.example.com alt_names=api.examp
 | Document | Contents |
 | --- | --- |
 | [Transit engine](docs/transit.md) | Key types, the endpoint reference (keys, encrypt, sign, HMAC, export), certificate requests, key import, and how this mount differs from transit |
-| [Certificate authority](docs/pki.md) | Generating, rotating, retiring and importing the authority, roles and the name policy, issue and sign, revocation and the CRL, intermediates, and how this plugin differs from pki |
+| [Certificate authority](docs/pki.md) | Generating, rotating, retiring and importing the authority, roles and the name policy, issue and sign, revocation, the CRL and the OCSP responder, intermediates, and how this plugin differs from pki |
 | [Operations](docs/operations.md) | Compatibility, installation in detail, operational notes, the source layout, development commands and the CI jobs |
 
 ## License

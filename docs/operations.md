@@ -121,8 +121,9 @@ pki/                 certificate authority backend, paths and name policy (the o
 main.go              the transit plugin binary
 cmd/pki-gmsm/        the certificate authority plugin binary
 internal/testca/     test-only SM2 CA that issues chains from certificate requests
+internal/ocspclient/ the OCSP client the tests and the CI walkthrough share
 scripts/ci/sm2ca/    CLI wrapper around internal/testca, used by the CI walkthrough
-scripts/ci/pkicheck/ CLI check that a certificate the pki-gmsm mount issued verifies
+scripts/ci/pkicheck/ certificate and OCSP checks the CI walkthrough runs
 scripts/             build helpers
 ```
 
@@ -148,6 +149,8 @@ plugins. `Integration Test` builds the transit plugin, installs Vault, starts a
 dev server, replays the walkthrough from the [README](../README.md), adds the
 certificate and `uid` checks, and runs the REST test against the same server.
 `PKI Integration Test` does the same for the certificate authority: it generates
-an authority, writes a role, issues a certificate, verifies that certificate
-with `scripts/ci/pkicheck`, revokes it, reads the CRL back in each of its three
-forms and finishes with `tidy`.
+an authority, writes a role, issues a certificate and verifies it with
+`scripts/ci/pkicheck`, asks the responder about the certificate while it is good
+and again once it is revoked, reads the CRL back in each of its three forms,
+runs `tidy`, and finishes by rotating the authority and switching back to the
+one that signed the certificate.

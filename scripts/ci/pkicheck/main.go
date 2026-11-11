@@ -1,34 +1,121 @@
 // Command pkicheck verifies that a certificate the pki-gmsm mount issued is
-// really signed by the authority the mount handed out with it. The CI
-// walkthrough uses it because neither the Vault CLI nor the certificate
-// tooling on a runner parses an SM2 signed certificate, while this check runs
-// in the same module as the plugin.
+// really signed by the authority the mount handed out with it, and asks the
+// responder of the mount about it. The CI walkthrough uses it because neither
+// the Vault CLI nor the certificate tooling on a runner parses an SM2 signed
+// certificate or a response signed with SM2, while these checks run in the same
+// module as the plugin.
 //
 // Usage:
 //
 //	pkicheck -cert leaf.pem -ca ca.pem
+//	pkicheck -request -cert leaf.pem -ca ca.pem
+//	pkicheck -response -ca ca.pem -status good < answer.der
 package main
 
 import (
+	"encoding/base64"
 	"encoding/pem"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/emmansun/gmsm/smx509"
+	"github.com/emmansun/vault-gmsm-plugin/internal/ocspclient"
 )
 
 func main() {
 	certPath := flag.String("cert", "", "PEM certificate to check")
 	caPath := flag.String("ca", "", "PEM certificate of the authority that should have signed it")
+	ask := flag.Bool("request", false, "print the base64 OCSP request about the certificate instead")
+	answer := flag.Bool("response", false, "read a DER OCSP response from stdin and check it")
+	want := flag.String("status", "", "the status the response should report: good, revoked or unknown")
 	flag.Parse()
 
-	if err := run(*certPath, *caPath); err != nil {
+	var err error
+	switch {
+	case *ask && *answer:
+		err = errors.New("choose one of -request and -response")
+	case *ask:
+		err = printRequest(*certPath, *caPath)
+	case *answer:
+		err = checkResponse(os.Stdin, *caPath, *want)
+	default:
+		err = run(*certPath, *caPath)
+	}
+
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "pkicheck: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// printRequest answers with the request as a client sends it, because building
+// one needs the key hashed the way the responder hashes it.
+func printRequest(certPath, caPath string) error {
+	if certPath == "" || caPath == "" {
+		return errors.New("both -cert and -ca are required")
+	}
+
+	leaf, err := readCertificate(certPath)
+	if err != nil {
+		return fmt.Errorf("could not read the certificate: %w", err)
+	}
+	ca, err := readCertificate(caPath)
+	if err != nil {
+		return fmt.Errorf("could not read the authority: %w", err)
+	}
+
+	der, err := ocspclient.Request(leaf.SerialNumber, ca)
+	if err != nil {
+		return fmt.Errorf("could not build the request: %w", err)
+	}
+
+	fmt.Println(base64.StdEncoding.EncodeToString(der))
+
+	return nil
+}
+
+// checkResponse reads the DER of an answer and says what it holds. The signature
+// is checked against the authority, because an answer nothing verified would
+// pass whatever it claimed.
+func checkResponse(answer io.Reader, caPath, want string) error {
+	if caPath == "" {
+		return errors.New("-ca is required")
+	}
+
+	der, err := io.ReadAll(answer)
+	if err != nil {
+		return fmt.Errorf("could not read the answer: %w", err)
+	}
+
+	ca, err := readCertificate(caPath)
+	if err != nil {
+		return fmt.Errorf("could not read the authority: %w", err)
+	}
+
+	result, err := ocspclient.Verify(der, ca)
+	if err != nil {
+		return err
+	}
+	if result.Status != ocspclient.Successful {
+		return fmt.Errorf("the responder refused the request with status %d", result.Status)
+	}
+	if want != "" && !strings.EqualFold(result.CertStatus.String(), want) {
+		return fmt.Errorf("the responder reports the certificate as %v, want %s", result.CertStatus, want)
+	}
+
+	fmt.Printf("serial %x is %v, this update %s, next update %s\n",
+		result.Serial, result.CertStatus,
+		result.ThisUpdate.Format(time.RFC3339), result.NextUpdate.Format(time.RFC3339))
+	if result.CertStatus == ocspclient.CertRevoked {
+		fmt.Printf("revoked at %s\n", result.RevokedAt.Format(time.RFC3339))
+	}
+
+	return nil
 }
 
 func run(certPath, caPath string) error {

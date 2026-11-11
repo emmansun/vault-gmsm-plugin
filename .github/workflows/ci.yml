@@ -485,6 +485,33 @@ jobs:
         go run ./scripts/ci/pkicheck -cert "$RUNNER_TEMP/leaf.pem" -ca "$RUNNER_TEMP/ca.pem" \
           || fail "the issued certificate does not verify against its authority"
 
+        # The responder is asked the way a plugin can be asked: the DER request
+        # travels base64-encoded, in a field of a write or in the path of a read.
+        # No token is sent, because a client that checks a certificate has none.
+        ocsp_request=$(go run ./scripts/ci/pkicheck -request \
+          -cert "$RUNNER_TEMP/leaf.pem" -ca "$RUNNER_TEMP/ca.pem")
+        [ -n "$ocsp_request" ] || fail "pkicheck built no OCSP request"
+
+        ocsp_type=$(curl -fsS -o "$RUNNER_TEMP/ocsp.der" -w '%{content_type}' \
+          -H 'Content-Type: application/json' \
+          --data-binary "$(jq -nc --arg request "$ocsp_request" '{request: $request}')" \
+          "$VAULT_ADDR/v1/$PKI_MOUNT/ocsp")
+        case $ocsp_type in
+          application/ocsp-response*) ;;
+          *) fail "ocsp answered with content type '$ocsp_type'" ;;
+        esac
+        go run ./scripts/ci/pkicheck -response -ca "$RUNNER_TEMP/ca.pem" -status good \
+          < "$RUNNER_TEMP/ocsp.der" || fail "the responder does not report the certificate as good"
+
+        # A request the responder cannot read is refused in the protocol, and the
+        # refusal carries the status code of the protocol as well.
+        ocsp_garbage=$(printf 'this is not an OCSP request' | base64 | tr -d '\n')
+        ocsp_code=$(curl -s -o "$RUNNER_TEMP/ocsp-bad.der" -w '%{http_code}' \
+          -H 'Content-Type: application/json' \
+          --data-binary "$(jq -nc --arg request "$ocsp_garbage" '{request: $request}')" \
+          "$VAULT_ADDR/v1/$PKI_MOUNT/ocsp")
+        expect "a request that is not an OCSP request is refused" 400 "$ocsp_code"
+
         expect "cert/:serial reports the serial" "$leaf_serial" \
           "$(vault read -field=serial_number "$PKI_MOUNT/cert/$leaf_serial")"
         expect "the listing holds the serial" "$leaf_serial" \
@@ -494,6 +521,15 @@ jobs:
         vault write "$PKI_MOUNT/revoke" serial_number="$leaf_serial" > /dev/null
         revoked=$(vault read -field=revocation_time "$PKI_MOUNT/cert/$leaf_serial")
         [ "${revoked:-0}" -gt 0 ] || fail "the revoked certificate reports revocation_time '$revoked'"
+
+        # The answer of the responder follows the revocation, and the GET form
+        # carries the encoding in the path.
+        ocsp_encoded=$(jq -rn --arg request "$ocsp_request" '$request|@uri')
+        curl -fsS -o "$RUNNER_TEMP/ocsp-revoked.der" \
+          "$VAULT_ADDR/v1/$PKI_MOUNT/ocsp/$ocsp_encoded" \
+          || fail "the responder did not answer a request in the path"
+        go run ./scripts/ci/pkicheck -response -ca "$RUNNER_TEMP/ca.pem" -status revoked \
+          < "$RUNNER_TEMP/ocsp-revoked.der" || fail "the responder does not report the revocation"
 
         crl_number=$(vault read -field=number "$PKI_MOUNT/crl")
         curl -fsS -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/$PKI_MOUNT/crl/pem" \

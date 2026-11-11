@@ -1,9 +1,10 @@
 # Certificate authority plugin (`pki-gmsm`)
 
 `pki-gmsm` is a certificate authority, not a transit engine: it generates SM2
-keys, signs X.509 certificates with `SM2WithSM3` and publishes a CRL. It is a
-mount type of its own, because Vault binds one plugin to one mount and because
-the lifecycle of a CA has nothing in common with that of a transit key.
+keys, signs X.509 certificates with `SM2WithSM3`, publishes a CRL and answers
+OCSP status queries. It is a mount type of its own, because Vault binds one
+plugin to one mount and because the lifecycle of a CA has nothing in common
+with that of a transit key.
 
 It is mounted separately from the [transit engine](transit.md), under a path of
 its own:
@@ -43,6 +44,7 @@ that was created elsewhere.
     - [A certificate for signing only](#a-certificate-for-signing-only)
   - [Issuing and signing](#issuing-and-signing)
   - [Reading, revoking and the CRL](#reading-revoking-and-the-crl)
+  - [The responder (OCSP)](#the-responder-ocsp)
   - [An intermediate authority](#an-intermediate-authority)
   - [Differences from Vault pki](#differences-from-vault-pki)
 
@@ -270,6 +272,55 @@ growing forever.
 `tidy` runs synchronously and answers with what it removed. It takes
 `safety_buffer` (72h), `tidy_cert_store` (off) and `tidy_revoked_certs` (on).
 
+## The responder (OCSP)
+
+`ocsp` answers RFC 6960 status queries about the certificates the mount issued,
+and the answer is signed by the authority that signed the certificate. A client
+asks about one certificate at a time:
+
+```bash
+# The DER request travels base64-encoded, in a field of a write...
+curl -s -o answer.der --data-binary "{\"request\": \"$REQUEST\"}" \
+  https://vault.example.com/v1/pki-gmsm/ocsp
+
+# ...or in the path of a read.
+curl -s -o answer.der https://vault.example.com/v1/pki-gmsm/ocsp/$REQUEST
+```
+
+The body is `application/ocsp-response`, and the answer is `good`, `revoked` or
+`unknown`. A request that cannot be answered is answered in the protocol as
+well — `malformedRequest`, `internalError` or `unauthorized`, over HTTP 400, 500
+or 401 — so that a client can tell a responder which refused from one that is
+not there. `ocsp` and `ocsp/*` are unauthenticated, because a client that checks
+a certificate holds no token of this Vault; that is the point of the endpoint.
+
+The encoding is required, and this is the one place where a plugin cannot follow
+the protocol literally. RFC 6960 also allows the request to be the body of the
+POST, and Vault reads that form for the responder it builds in, but a plugin is
+handed the data of a request and not the HTTP request, so a DER body never
+reaches it. The base64 form is what a plugin can receive: a stock OCSP client
+that posts DER to the address in `ocsp_servers` needs a responder inside Vault,
+or a shim that encodes the request first.
+
+Only the first request of a message is answered, and a message that names more
+than one certificate is refused rather than half answered. The digests a request
+may name are SHA-1, SHA-256, SHA-384, SHA-512 and SM3, which is the one a client
+of an SM2 authority uses.
+
+The status comes from what the mount recorded. A serial it never issued is
+`unknown`. After a rotation, a certificate of the authority that signed it stays
+`good` or `revoked`, while it is `unknown` under the authority that replaced it,
+and a revocation recorded against one authority never travels to the other. The
+answer names the authority itself as the responder, so the certificate that
+issued a certificate is what checks its answer, and the answer is good for
+twelve hours.
+
+The address a certificate publishes is the one written in `config/urls`:
+
+```bash
+vault write pki-gmsm/config/urls ocsp_servers=https://vault.example.com/v1/pki-gmsm/ocsp
+```
+
 ## An intermediate authority
 
 A second mount becomes an intermediate of the first in two steps. The first
@@ -301,7 +352,7 @@ remaining validity of the signing authority, with a warning.
 | `no_store` | The certificate is kept nowhere and cannot be revoked by serial | The metadata is kept, so the serial stays revocable |
 | Tidy | Asynchronous, with a status endpoint | Synchronous, and it answers with what it removed |
 | CRL | Rebuilt on demand, cached in memory | Cached as DER in storage, because the signature is randomised |
-| OCSP | `ocsp_enable` and a responder | `ocsp_servers` is stored; nothing serves OCSP |
+| OCSP | `ocsp_enable` and a responder that reads the DER body | A responder that reads the request base64-encoded, because a plugin never sees the body |
 | ACME, EST, CRL building from a fixed list | supported | not implemented |
 
 Everything else — roles, the name policy, issue and sign, serial and certificate

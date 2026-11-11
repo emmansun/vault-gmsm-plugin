@@ -53,6 +53,10 @@ func Backend(ctx context.Context, conf *logical.BackendConfig) (*backend, error)
 		// is allowed to read through the API.
 		PathsSpecial: &logical.Paths{
 			SealWrapStorage: []string{keyPrefix},
+
+			// A client asks a responder about a certificate it was handed; it
+			// holds no token of this Vault, which is the point of the endpoint.
+			Unauthenticated: []string{"ocsp", "ocsp/*"},
 		},
 
 		Paths: []*framework.Path{
@@ -81,6 +85,8 @@ func Backend(ctx context.Context, conf *logical.BackendConfig) (*backend, error)
 			b.pathCRLPEM(),
 			b.pathCRLDER(),
 			b.pathCRLRotate(),
+			b.pathOCSP(),
+			b.pathOCSPRequest(),
 			b.pathConfigCA(),
 			b.pathConfigURLs(),
 			b.pathTidy(),
