@@ -366,14 +366,29 @@ remaining validity of the signing authority, with a warning.
 | Certificate signature | SHA-2 family | `SM2WithSM3` only |
 | Subject key identifier | SHA-1 of the public key, RFC 5280 method 1 | SM3 of the public key, truncated to 160 bits |
 | Issuers | Many, addressed by name or identifier, with rotation and cross-signing | Many, addressed by identifier or name, with rotation; no cross-signing |
+| Changing an authority | `POST issuer/:ref` sets its name, its `usage` (`issuing-certificates`, `crl-signing`, `ocsp-signing`, `read-only`), `leaf_not_after_behavior`, `manual_chain`, `revocation_signature_algorithm` and its own AIA and CRL URLs | An authority is read, made default or deleted; once written it does not change |
+| Naming the authority that signs | In the path, on `issuer/:ref/issue`, `/sign`, `/sign-intermediate`, `/sign-self-issued` and `/sign-verbatim`, or through `role.issuer_ref` | Through `role.issuer_ref` only |
+| Reading an authority | `issuer/:ref` as JSON, `issuer/:ref/pem` and `issuer/:ref/der` | `issuer/:ref` as JSON; `ca` and `ca/pem` for the default |
 | Importing an authority | `config/ca`, `issuers/import/bundle` | `config/ca`, as the first authority of a mount |
+| Certificate profile | Role fields `not_after`, `policy_identifiers`, `allowed_other_sans`, `allowed_serial_numbers`, `allowed_user_ids`, `csr_extra_names_oids` and `basic_constraints_valid_for_non_ca` | None of them: a certificate is dated from `ttl` and carries no policy and no `otherName` |
+| A signed intermediate | Name constraints (`permitted_dns_domains`, `excluded_dns_domains`, `permitted_ip_addresses`, `excluded_ip_addresses`), `key_usage`, `not_before_duration` and `enforce_leaf_not_after_behavior` | `csr`, `common_name`, `use_csr_values`, `ttl`, `max_path_length` and `format` |
+| Revoking | `revoke` by serial or by PEM, with a `revocation_reason`; `revoke-with-key` takes the private key instead; `LIST certs/revoked` reports what was revoked | By serial only, with no reason, and no path lists the revocations |
+| CRL and OCSP lifetime | `config/crl` sets `expiry`, `ocsp_expiry`, `disable`, `ocsp_disable`, `auto_rebuild` and `max_crl_entries` | 72 hours and 12 hours, fixed in the code |
+| Delta CRLs | `crl/delta`, `/delta/pem`, `/delta/der`, `issuer/:ref/crl/delta` and `crl/rotate-delta` | Not implemented |
+| A list built elsewhere | `issuer/:ref/sign-revocation-list` signs a supplied list of entries; `issuer/:ref/resign-crls` combines lists | Not implemented |
+| URLs in a certificate | `config/urls` with `{{issuer_id}}` and `{{cluster_aia_path}}`, per-authority overrides, delta CRL points, and `config/cluster` for the address of the cluster | Three static lists on the mount |
+| CA key | `keys`, `key/:ref`, `config/keys`, a root-only `keys/:ref/export`, and the `kms` key type, which needs managed keys | The key lives in the issuer record, and there is no external signer |
 | Lease | Optional per-certificate lease | Not implemented; `generate_lease` only produces a warning |
 | `no_store` | The certificate is kept nowhere and cannot be revoked by serial | The metadata is kept, so the serial stays revocable |
-| Tidy | Asynchronous, with a status endpoint | Synchronous, and it answers with what it removed |
+| Reading a stored certificate | `cert/:serial`, `cert/:serial/raw`, `/raw/pem` and `cert-metadata/:serial` | `cert/:serial`, which carries the PEM |
+| Tidy | Asynchronous, with `tidy/:type/status`, `tidy-cancel` and `config/auto-tidy` | Synchronous, and it answers with what it removed |
+| Deleting the authority | `DELETE root` needs a root token | Any token whose policy allows writing `root`, and only once one authority is left on the mount |
+| Enrollment protocols | ACME in the open-source engine; EST, CMPv2 and SCEP only in Vault Enterprise | None |
 | CRL | Rebuilt on demand, cached in memory | Cached as DER in storage, because the signature is randomised |
 | OCSP | `ocsp_enable` and a responder that reads the DER body | A responder that reads the request base64-encoded, because a plugin never sees the body |
-| ACME, EST, CRL building from a fixed list | supported | not implemented |
 
-Everything else — roles, the name policy, issue and sign, serial and certificate
-storage, revocation, the CRL endpoints and `config/urls` — follows the pki
-behaviour, with the names of the fields unchanged.
+Unified CRLs and OCSP, the external policy service and managed keys are Vault
+Enterprise features; the table compares this plugin with the open-source engine.
+Where a path or a field exists in both, it behaves as it does in pki and keeps
+the name pki gives it — the rows above are what is absent or different, not what
+is renamed.
