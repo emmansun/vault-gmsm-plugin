@@ -158,6 +158,21 @@ func (b *backend) issuerID(ctx context.Context, s logical.Storage) (string, erro
 	return index.ID, nil
 }
 
+// legacyIssuerID is the authority that the records written before a certificate
+// recorded its issuer belong to: the one the index remembers, or, on a mount
+// that has never signed with another authority, the one it signs with now.
+func (b *backend) legacyIssuerID(ctx context.Context, s logical.Storage) (string, error) {
+	index, err := getJSON[issuerIndex](ctx, s, configIssuerPath)
+	if err != nil || index == nil {
+		return "", err
+	}
+	if index.LegacyOwner != "" {
+		return index.LegacyOwner, nil
+	}
+
+	return index.ID, nil
+}
+
 const pathCAHelpSyn = `Read the certificate authority certificate and chain`
 
 const pathCAHelpDesc = `

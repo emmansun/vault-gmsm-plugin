@@ -121,9 +121,15 @@ func (b *backend) deleteExpiredCertificates(ctx context.Context, s logical.Stora
 // deleteExpiredRevocations drops a revocation once the certificate it names has
 // been expired for longer than the safety buffer. A revocation without an
 // expiration is kept: the certificate behind it may still be valid. It answers
-// with the issuers whose lists lost an entry.
+// with the issuers whose lists lost an entry, which includes the authority a
+// record written without one belongs to.
 func (b *backend) deleteExpiredRevocations(ctx context.Context, s logical.Storage, cutoff time.Time) (int, map[string]struct{}, error) {
 	serials, err := s.List(ctx, revokedPrefix)
+	if err != nil {
+		return 0, nil, err
+	}
+
+	legacyID, err := b.legacyIssuerID(ctx, s)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -143,8 +149,13 @@ func (b *backend) deleteExpiredRevocations(ctx context.Context, s logical.Storag
 			return removed, touched, err
 		}
 		removed++
-		if record.IssuerID != "" {
-			touched[record.IssuerID] = struct{}{}
+
+		owner := record.IssuerID
+		if owner == "" {
+			owner = legacyID
+		}
+		if owner != "" {
+			touched[owner] = struct{}{}
 		}
 	}
 

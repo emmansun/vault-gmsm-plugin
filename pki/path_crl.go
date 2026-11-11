@@ -676,14 +676,20 @@ func nextCRLNumber(previous *crlEntry) (int64, error) {
 
 // crlEntries turns the revocation records of one issuer into entries of its
 // list. A revocation belongs to the authority that signed the certificate, so a
-// merged list would name serials its own signature says nothing about. The
-// reason is carried over as it was recorded; leaving it out would make a
-// compromise look like a certificate that simply ceased to be used. A
-// certificate that has expired is left out: a list says what a client may still
-// be shown, not what happened, and without that it would grow until someone ran
-// tidy.
+// merged list would name serials its own signature says nothing about; one
+// recorded before the mount named the authority with it belongs to the
+// authority that was signing at the time. The reason is carried over as it was
+// recorded; leaving it out would make a compromise look like a certificate that
+// simply ceased to be used. A certificate that has expired is left out: a list
+// says what a client may still be shown, not what happened, and without that it
+// would grow until someone ran tidy.
 func (b *backend) crlEntries(ctx context.Context, s logical.Storage, issuerID string) ([]smx509.RevocationListEntry, error) {
 	names, err := s.List(ctx, revokedPrefix)
+	if err != nil {
+		return nil, err
+	}
+
+	legacyID, err := b.legacyIssuerID(ctx, s)
 	if err != nil {
 		return nil, err
 	}
@@ -695,7 +701,7 @@ func (b *backend) crlEntries(ctx context.Context, s logical.Storage, issuerID st
 		if err != nil {
 			return nil, err
 		}
-		if record == nil || record.IssuerID != issuerID || record.hasExpired(now) {
+		if record == nil || !belongsToIssuer(record.IssuerID, issuerID, legacyID) || record.hasExpired(now) {
 			continue
 		}
 

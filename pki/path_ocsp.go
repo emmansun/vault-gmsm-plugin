@@ -220,12 +220,15 @@ func (b *backend) signOCSPResponse(ctx context.Context, s logical.Storage, issue
 
 // ocspStatus says what the mount knows about one serial. The certificate record
 // decides whether the authority in question issued it at all; only then does the
-// revocation say it is no longer good. A serial of another authority is unknown
-// here, because the list that would report its revocation belongs to that one.
+// revocation say it is no longer good. A record written before the mount named
+// the authority belongs to the one that was signing when it was written, so a
+// rotation does not turn its certificates into strangers. A serial of another
+// authority is unknown here, because the list that would report its revocation
+// belongs to that one.
 func (b *backend) ocspStatus(ctx context.Context, s logical.Storage, issuer *issuerEntry, serial *big.Int) (ocspAnswer, error) {
 	key := serialHex(serial)
 
-	defaultID, err := b.issuerID(ctx, s)
+	legacyID, err := b.legacyIssuerID(ctx, s)
 	if err != nil {
 		return ocspAnswer{}, err
 	}
@@ -234,7 +237,7 @@ func (b *backend) ocspStatus(ctx context.Context, s logical.Storage, issuer *iss
 	if err != nil {
 		return ocspAnswer{}, err
 	}
-	if record == nil || !belongsToIssuer(record.IssuerID, issuer.ID, defaultID) {
+	if record == nil || !belongsToIssuer(record.IssuerID, issuer.ID, legacyID) {
 		return ocspAnswer{status: ocspUnknown}, nil
 	}
 
@@ -242,7 +245,7 @@ func (b *backend) ocspStatus(ctx context.Context, s logical.Storage, issuer *iss
 	if err != nil {
 		return ocspAnswer{}, err
 	}
-	if revocation == nil || !belongsToIssuer(revocation.IssuerID, issuer.ID, defaultID) {
+	if revocation == nil || !belongsToIssuer(revocation.IssuerID, issuer.ID, legacyID) {
 		return ocspAnswer{status: ocspGood}, nil
 	}
 

@@ -36,11 +36,18 @@ func crlStorePath(issuerID string) string { return crlPrefix + issuerID }
 
 func deltaCRLStorePath(issuerID string) string { return crlPrefix + "delta/" + issuerID }
 
-// issuerIndex points at the issuer the mount currently uses. It exists so that
-// a future multi-issuer mount can add issuer records without moving any of the
-// other keys.
+// issuerIndex points at the issuer the mount currently uses, and remembers
+// which authority the records that do not name one belong to.
 type issuerIndex struct {
 	ID string `json:"id"`
+
+	// LegacyOwner is the authority that signed the records written before a
+	// certificate recorded the issuer that signed it. It is written the first
+	// time the mount points at another authority, because that is the first
+	// moment such a record would otherwise be handed to the wrong one. It may
+	// name an authority that has since been retired: the records it explains
+	// were removed with it, and every record written since names its own.
+	LegacyOwner string `json:"legacy_owner,omitempty"`
 }
 
 // The usages an authority can be given. An authority that names none is
@@ -374,9 +381,25 @@ func (b *backend) putIssuer(ctx context.Context, s logical.Storage, id string, i
 	return b.setIssuerDefault(ctx, s, id)
 }
 
-// setIssuerDefault points the mount at one of the authorities it holds.
+// setIssuerDefault points the mount at one of the authorities it holds. Moving
+// the pointer is also the last moment at which a record written without an
+// issuer can be attributed: it belongs to the authority that signed until now,
+// and after the move nothing else in the mount says which one that was.
 func (b *backend) setIssuerDefault(ctx context.Context, s logical.Storage, id string) error {
-	return putJSON(ctx, s, configIssuerPath, &issuerIndex{ID: id})
+	index, err := getJSON[issuerIndex](ctx, s, configIssuerPath)
+	if err != nil {
+		return err
+	}
+	if index == nil {
+		index = &issuerIndex{}
+	}
+
+	if index.ID != "" && index.ID != id && index.LegacyOwner == "" {
+		index.LegacyOwner = index.ID
+	}
+	index.ID = id
+
+	return putJSON(ctx, s, configIssuerPath, index)
 }
 
 // issuers reads every authority the mount holds. The identifiers are sorted so
@@ -454,10 +477,11 @@ func (b *backend) revocationRecord(ctx context.Context, s logical.Storage, seria
 
 // belongsToIssuer says whether a record that names an issuer was signed by the
 // authority in question. A record written before the mount recorded the issuer
-// with every certificate belongs to the authority the mount signed with at the
-// time, which is the default one.
-func belongsToIssuer(recordIssuer, issuerID, defaultID string) bool {
-	return recordIssuer == issuerID || (recordIssuer == "" && issuerID == defaultID)
+// with every certificate belongs to legacyID, the authority that was signing
+// when it was written, and not to whichever authority the mount has moved on
+// to since: a rotation would otherwise hand it to the authority that took over.
+func belongsToIssuer(recordIssuer, issuerID, legacyID string) bool {
+	return recordIssuer == issuerID || (recordIssuer == "" && issuerID == legacyID)
 }
 
 // liveCertificates counts the certificates of one issuer that a client can
@@ -465,7 +489,7 @@ func belongsToIssuer(recordIssuer, issuerID, defaultID string) bool {
 // early counts as well: what makes it harmless is its expiration, and retiring
 // the authority takes the list that would have said it was revoked with it.
 func (b *backend) liveCertificates(ctx context.Context, s logical.Storage, issuerID string) (int, time.Time, error) {
-	defaultID, err := b.issuerID(ctx, s)
+	legacyID, err := b.legacyIssuerID(ctx, s)
 	if err != nil {
 		return 0, time.Time{}, err
 	}
@@ -483,7 +507,7 @@ func (b *backend) liveCertificates(ctx context.Context, s logical.Storage, issue
 		if err != nil {
 			return 0, time.Time{}, err
 		}
-		if record == nil || !belongsToIssuer(record.IssuerID, issuerID, defaultID) {
+		if record == nil || !belongsToIssuer(record.IssuerID, issuerID, legacyID) {
 			continue
 		}
 		if !record.Expiration.After(now) {
@@ -508,6 +532,10 @@ func (b *backend) retireIssuer(ctx context.Context, s logical.Storage, issuer *i
 	if err != nil {
 		return 0, 0, err
 	}
+	legacyID, err := b.legacyIssuerID(ctx, s)
+	if err != nil {
+		return 0, 0, err
+	}
 
 	certificates := 0
 	names, err := s.List(ctx, certPrefix)
@@ -519,7 +547,7 @@ func (b *backend) retireIssuer(ctx context.Context, s logical.Storage, issuer *i
 		if err != nil {
 			return 0, 0, err
 		}
-		if record == nil || !belongsToIssuer(record.IssuerID, issuer.ID, defaultID) {
+		if record == nil || !belongsToIssuer(record.IssuerID, issuer.ID, legacyID) {
 			continue
 		}
 		if err := s.Delete(ctx, certPrefix+name); err != nil {
@@ -538,7 +566,7 @@ func (b *backend) retireIssuer(ctx context.Context, s logical.Storage, issuer *i
 		if err != nil {
 			return certificates, revocations, err
 		}
-		if record == nil || !belongsToIssuer(record.IssuerID, issuer.ID, defaultID) {
+		if record == nil || !belongsToIssuer(record.IssuerID, issuer.ID, legacyID) {
 			continue
 		}
 		if err := s.Delete(ctx, revokedPrefix+name); err != nil {

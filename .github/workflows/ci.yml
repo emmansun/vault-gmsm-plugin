@@ -565,8 +565,14 @@ jobs:
         [ "${revoked:-0}" -gt 0 ] || fail "the revoked certificate reports revocation_time '$revoked'"
         expect "cert/:serial reports the reason" 1 \
           "$(vault read -field=revocation_reason "$PKI_MOUNT/cert/$leaf_serial")"
-        expect "the listing names the revoked serial" "$leaf_serial" \
-          "$(vault list -format=json "$PKI_MOUNT/certs/revoked" | jq -r '.[0]')"
+        # The CLI answers a listing that failed with an empty JSON object rather
+        # than with an error, so the listing itself is part of the failure: an
+        # empty object here is a path that did not answer.
+        revoked_listing=$(vault list -format=json "$PKI_MOUNT/certs/revoked" || true)
+        revoked_named=$(printf '%s' "${revoked_listing:-null}" \
+          | jq -r 'if type == "array" then .[0] // empty else empty end')
+        [ "$revoked_named" = "$leaf_serial" ] \
+          || fail "the listing names '$revoked_named', want '$leaf_serial': ${revoked_listing:-nothing}"
 
         # The answer of the responder follows the revocation, and the GET form
         # carries the encoding in the path.

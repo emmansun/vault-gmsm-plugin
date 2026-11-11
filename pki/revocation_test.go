@@ -227,6 +227,13 @@ func TestCertsRevokedListsAcrossAuthorities(t *testing.T) {
 		}
 	}
 
+	// Vault adds the slash to a list request before the mount sees it, so the
+	// listing has to answer in that form too: the bare path is the one a test
+	// writes, and the slashed one is the only one a client can reach.
+	if slashed := mustList(t, b, storage, "certs/revoked/"); len(slashed) != 2 {
+		t.Fatalf("the listing at certs/revoked/ names %v, want the two revoked serials", slashed)
+	}
+
 	// A certificate that was only issued is not a revoked one, so it stays out.
 	askAboutIssues(t, b, storage, "kept.example.com")
 	if listed := mustList(t, b, storage, "certs/revoked"); len(listed) != 2 {

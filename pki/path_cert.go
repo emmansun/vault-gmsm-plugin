@@ -58,8 +58,18 @@ func (b *backend) pathCertRead(ctx context.Context, req *logical.Request, d *fra
 		"issued":        record.Issued.Unix(),
 		"expiration":    record.Expiration.Unix(),
 	}
-	if record.IssuerID != "" {
-		data["issuer_id"] = record.IssuerID
+	// A record written before the mount named the issuer with it still belongs
+	// to one, and answering without it would leave a caller guessing which
+	// authority signed the certificate it is looking at.
+	issuerID := record.IssuerID
+	if issuerID == "" {
+		issuerID, err = b.legacyIssuerID(ctx, req.Storage)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if issuerID != "" {
+		data["issuer_id"] = issuerID
 	}
 	if len(record.Certificate) > 0 {
 		data["certificate"] = pemCertificate(record.Certificate)
@@ -117,7 +127,11 @@ func (b *backend) pathCertsListRead(ctx context.Context, req *logical.Request, _
 // revoked but never listed is a certificate nobody looked for.
 func (b *backend) pathCertsRevoked() *framework.Path {
 	return &framework.Path{
-		Pattern: "certs/revoked$",
+		// Vault adds the slash to the path of a list request before the mount
+		// sees it, so a pattern that does not allow one is a path that exists
+		// in the tests and nowhere a client can reach: certs/ is written with
+		// the same optional slash for that reason.
+		Pattern: "certs/revoked/?$",
 
 		DisplayAttrs: &framework.DisplayAttributes{
 			OperationPrefix: operationPrefix + "-certs",

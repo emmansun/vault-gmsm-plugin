@@ -471,6 +471,14 @@ that address keeps answering for as long as the mount holds the authority.
 Retiring the authority is what takes its list away, which is why that is refused
 while its certificates are still valid.
 
+A mount written before every certificate recorded the authority that signed it
+holds records that name none. They belong to the authority that was signing when
+they were written, and the mount remembers which one that was the first time it
+points at another: a rotation does not hand them to the authority that takes
+over. The revocation of such a certificate still reaches the list its client
+downloads, and that authority is not retired while those certificates are in
+use.
+
 `tidy` runs synchronously and answers with what it removed. It takes
 `safety_buffer` (72h), `tidy_cert_store` (off) and `tidy_revoked_certs` (on).
 The list stops carrying an expired certificate on its own, but the records of

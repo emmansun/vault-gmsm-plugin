@@ -72,11 +72,11 @@ func (b *backend) pathRevokeWrite(ctx context.Context, req *logical.Request, d *
 
 	// The revocation belongs to the authority that signed the certificate, so it
 	// reaches that authority's list even after the mount has moved on. A record
-	// written before certificates named their issuer belongs to the one the mount
-	// signs with.
+	// written before certificates named their issuer belongs to the one that was
+	// signing when it was written.
 	issuerID := record.IssuerID
 	if issuerID == "" {
-		issuerID, err = b.issuerID(ctx, req.Storage)
+		issuerID, err = b.legacyIssuerID(ctx, req.Storage)
 		if err != nil {
 			return nil, err
 		}
