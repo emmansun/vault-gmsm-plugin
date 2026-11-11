@@ -351,10 +351,70 @@ func crlRotationResponse(entry *crlEntry, delta bool) *logical.Response {
 }
 
 // crlForRead answers with a usable list of one authority: the full one, or the
-// changes since it. A list that is missing, stale, or outdated by a revocation
-// is rebuilt, unless config/crl turned rebuilding off, because a client cannot
-// be left applying changes to a list that never moves.
+// changes since it. A list that can be served as it is costs the read lock
+// only, so a client fetching one does not queue behind a certificate being
+// issued; a list that has to be signed is built and stored under the write
+// lock, because the number must not move twice.
 func (b *backend) crlForRead(ctx context.Context, s logical.Storage, ref string, delta bool) (*crlEntry, *logical.Response, error) {
+	entry, resp, err := b.servedCRL(ctx, s, ref, delta)
+	if err != nil || resp != nil || entry != nil {
+		return entry, resp, err
+	}
+
+	return b.signCRL(ctx, s, ref, delta)
+}
+
+// servedCRL answers with a cached list when it can be served as it is, and with
+// nothing when one has to be signed. A missing authority is answered here too,
+// because saying so needs no lock of its own.
+func (b *backend) servedCRL(ctx context.Context, s logical.Storage, ref string, delta bool) (*crlEntry, *logical.Response, error) {
+	b.caMu.RLock()
+	defer b.caMu.RUnlock()
+
+	issuer, resp, err := b.crlIssuer(ctx, s, ref)
+	if err != nil || resp != nil {
+		return nil, resp, err
+	}
+
+	config, err := b.crlConfig(ctx, s)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	full, err := b.currentCRL(ctx, s, issuer.ID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if full == nil || len(full.DER) == 0 {
+		return nil, nil, nil
+	}
+
+	// A delta follows a full list, so it can only be served when that list
+	// would be: a read that signs a new base moves the base the delta names.
+	if config.rebuilds() && (full.Dirty || !time.Now().Before(full.NextUpdate)) {
+		return nil, nil, nil
+	}
+	if !delta {
+		return full, nil, nil
+	}
+
+	previous, err := b.currentDeltaCRL(ctx, s, issuer.ID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if previous != nil && previous.BaseNumber == full.Number && len(previous.DER) > 0 {
+		if !previous.Dirty && time.Now().Before(previous.NextUpdate) {
+			return previous, nil, nil
+		}
+	}
+
+	return nil, nil, nil
+}
+
+// signCRL builds the list a read could not serve. It is the one path of a read
+// that writes, so it holds the write lock: the revocations it names cannot
+// arrive halfway through, and the number it takes is not taken twice.
+func (b *backend) signCRL(ctx context.Context, s logical.Storage, ref string, delta bool) (*crlEntry, *logical.Response, error) {
 	b.caMu.Lock()
 	defer b.caMu.Unlock()
 
@@ -618,20 +678,24 @@ func nextCRLNumber(previous *crlEntry) (int64, error) {
 // list. A revocation belongs to the authority that signed the certificate, so a
 // merged list would name serials its own signature says nothing about. The
 // reason is carried over as it was recorded; leaving it out would make a
-// compromise look like a certificate that simply ceased to be used.
+// compromise look like a certificate that simply ceased to be used. A
+// certificate that has expired is left out: a list says what a client may still
+// be shown, not what happened, and without that it would grow until someone ran
+// tidy.
 func (b *backend) crlEntries(ctx context.Context, s logical.Storage, issuerID string) ([]smx509.RevocationListEntry, error) {
 	names, err := s.List(ctx, revokedPrefix)
 	if err != nil {
 		return nil, err
 	}
 
+	now := time.Now()
 	entries := make([]smx509.RevocationListEntry, 0, len(names))
 	for _, name := range names {
 		record, err := b.revocationRecord(ctx, s, name)
 		if err != nil {
 			return nil, err
 		}
-		if record == nil || record.IssuerID != issuerID {
+		if record == nil || record.IssuerID != issuerID || record.hasExpired(now) {
 			continue
 		}
 
@@ -683,8 +747,10 @@ const pathCRLHelpDesc = `
 The certificate revocation list of the mount, signed by its authority. The
 signed list is kept as it is and rebuilt when a certificate has been revoked
 since or when it has expired, so two reads of an unchanged list answer with the
-same bytes. Use crl/rotate to force a new list with a new number, and config/crl
-to say how long a list claims to be current and whether a read may rebuild it.
+same bytes. A certificate that has passed its expiration is left out of it, so
+a list only names the certificates a client may still be shown. Use crl/rotate
+to force a new list with a new number, and config/crl to say how long a list
+claims to be current and whether a read may rebuild it.
 `
 
 const pathCRLRotateHelpSyn = `Rebuild the certificate revocation list`

@@ -402,6 +402,11 @@ names: the ref of the path wins over `role.issuer_ref`. That is how a
 certificate is still issued from the authority a mount has rotated away from,
 without a role that pins every request to it.
 
+Signatures do not queue behind each other. A certificate, a list and an answer
+are signed under a shared read lock, so requests that only sign run beside each
+other rather than one at a time. What takes the lock for itself is a change: a
+revocation, a rotation, an import or a write to an authority.
+
 ## Reading, revoking and the CRL
 
 | Path | Purpose |
@@ -439,10 +444,16 @@ The CRL is cached as DER in storage, because an SM2 signature is randomised: a
 CRL rebuilt on every read would carry a different signature each time and no
 client could cache it. Writing a revocation marks the cache dirty and the next
 read rebuilds it, so `revoke` alone never pays for a signature nobody asked for.
-`crl/rotate` forces a rebuild, and `tidy` is what keeps the revoked list from
-growing forever. `config/crl` sets how long a list claims to be current, and
-`auto_rebuild=false` there stops a read from signing at all: the rotate paths
-then become the only way a list changes.
+`crl/rotate` forces a rebuild. `config/crl` sets how long a list claims to be
+current, and `auto_rebuild=false` there stops a read from signing at all: the
+rotate paths then become the only way a list changes.
+
+A list names the certificates a client may still be shown, so one that has
+passed its expiration is left out of it the next time the list is signed. That
+is what keeps the list itself from growing: it carries the revocations of the
+certificates that are still live, not a history. The records behind the entries
+are kept, so `cert/:serial`, `certs/revoked` and the responder keep answering
+for a serial after its entry has left the list.
 
 A mount that has rotated holds more than one authority, and `crl` answers for
 the one it signs with. Each authority keeps a list of its own, and
@@ -462,6 +473,11 @@ while its certificates are still valid.
 
 `tidy` runs synchronously and answers with what it removed. It takes
 `safety_buffer` (72h), `tidy_cert_store` (off) and `tidy_revoked_certs` (on).
+The list stops carrying an expired certificate on its own, but the records of
+the certificates and of the revocations stay until tidy says they may go, so
+schedule it rather than calling it by hand: nightly is enough for a mount that
+issues every day, and weekly for one whose certificates live for weeks. A mount
+that is never tidied keeps every certificate it ever issued.
 
 ### Delta CRLs
 
@@ -494,9 +510,9 @@ list it can no longer use.
 
 Two things a client has to live with. Successive deltas repeat what the full
 list still lacks, so an entry may appear in more than one and applying it twice
-means the same as once. And no list says that a revocation was taken back:
-`tidy` drops the record of a certificate that has expired, and by then a client
-has stopped accepting it, so `removeFromCRL` is never written.
+means the same as once. And no list says that a revocation was taken back: a
+list stops naming a certificate once it has expired, and by then a client has
+stopped accepting it, so `removeFromCRL` is never written.
 
 ## The responder (OCSP)
 

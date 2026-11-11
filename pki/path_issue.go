@@ -391,11 +391,13 @@ func (b *backend) signCertificate(ctx context.Context, req *logical.Request, d *
 }
 
 // signForMount loads the authority a role names, signs one certificate and
-// returns it with the issuer and the chain. It holds the lock for the whole step
-// so a concurrent delete cannot pull the key from under it.
+// returns it with the issuer and the chain. Signing changes neither the
+// authority nor the key, so it holds the read lock: a certificate request does
+// not wait for the one beside it, but it does wait for a change of the authority
+// it is about to sign with.
 func (b *backend) signForMount(ctx context.Context, s logical.Storage, request certificateRequest, issuerRef string) (*smx509.Certificate, *issuerEntry, []*smx509.Certificate, []string, error) {
-	b.caMu.Lock()
-	defer b.caMu.Unlock()
+	b.caMu.RLock()
+	defer b.caMu.RUnlock()
 
 	_, issuer, err := b.issuerByRef(ctx, s, issuerRef)
 	if err != nil {

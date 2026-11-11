@@ -1,6 +1,7 @@
 package pki
 
 import (
+	"context"
 	"encoding/asn1"
 	"testing"
 	"time"
@@ -230,6 +231,71 @@ func TestCertsRevokedListsAcrossAuthorities(t *testing.T) {
 	askAboutIssues(t, b, storage, "kept.example.com")
 	if listed := mustList(t, b, storage, "certs/revoked"); len(listed) != 2 {
 		t.Fatalf("issuing a certificate changed the listing to %v", listed)
+	}
+}
+
+// TestCRLStopsNamingCertificatesThatExpired checks what keeps the list from
+// growing between tidy runs: a certificate that has expired is left out of the
+// list the next time one is signed, because no client may present it any more,
+// while the revocation itself stays recorded and keeps answering.
+func TestCRLStopsNamingCertificatesThatExpired(t *testing.T) {
+	b, storage := newTestBackend(t)
+	root := generateRoot(t, b, storage)
+	writeWebRole(t, b, storage)
+
+	_, issuedLive := askAboutIssues(t, b, storage, "live.example.com")
+	lapsed, issuedLapsed := askAboutIssues(t, b, storage, "lapsed.example.com")
+	for _, issued := range []*logical.Response{issuedLive, issuedLapsed} {
+		mustWrite(t, b, storage, "revoke", map[string]interface{}{
+			"serial_number": pemData(t, issued.Data, "serial_number"),
+		})
+	}
+	liveSerial := pemData(t, issuedLive.Data, "serial_number")
+	lapsedSerial := pemData(t, issuedLapsed.Data, "serial_number")
+
+	// The second certificate reaches the expiration it was issued with. The
+	// revocation keeps the expiration it was given when it was recorded.
+	ctx := context.Background()
+	key, err := normalizeSerial(lapsedSerial)
+	if err != nil {
+		t.Fatalf("the serial %q is not hexadecimal: %v", lapsedSerial, err)
+	}
+	record, err := b.revocationRecord(ctx, storage, key)
+	if err != nil || record == nil {
+		t.Fatalf("could not read the revocation of %s: %v", lapsedSerial, err)
+	}
+	record.Expiration = time.Now().Add(-time.Hour).Unix()
+	if err := putJSON(ctx, storage, revokedPrefix+key, record); err != nil {
+		t.Fatalf("could not record the expiration of %s: %v", lapsedSerial, err)
+	}
+
+	entry := oneEntry(t, parseRevocationList(t, mustRead(t, b, storage, "crl")))
+	if got := formatSerial(serialHex(entry.SerialNumber)); got != liveSerial {
+		t.Fatalf("the list names %s, want the certificate that is still live", got)
+	}
+
+	// The revocation is not forgotten, only left out of the list: the listing,
+	// the record and the responder still answer for the serial.
+	if listed := mustList(t, b, storage, "certs/revoked"); !containsName(listed, lapsedSerial) {
+		t.Fatalf("the listing %v no longer names %s", listed, lapsedSerial)
+	}
+	if revokedAt := mustRead(t, b, storage, "cert/"+lapsedSerial).Data["revocation_time"]; revokedAt == nil {
+		t.Fatal("cert/:serial no longer reports the revocation")
+	}
+	answer, _ := askOCSP(t, b, storage, lapsed.SerialNumber, root)
+	if answer.CertStatus != ocspclient.CertRevoked {
+		t.Fatalf("the certificate is reported as %v", answer.CertStatus)
+	}
+
+	// A record without an expiration says nothing about when the certificate
+	// lapses, so the list keeps naming it rather than guessing.
+	record.Expiration = 0
+	if err := putJSON(ctx, storage, revokedPrefix+key, record); err != nil {
+		t.Fatalf("could not clear the expiration of %s: %v", lapsedSerial, err)
+	}
+	mustWrite(t, b, storage, "crl/rotate", nil)
+	if list := parseRevocationList(t, mustRead(t, b, storage, "crl")); len(list.RevokedCertificateEntries) != 2 {
+		t.Fatalf("the list names %d certificates, want the two revoked ones", len(list.RevokedCertificateEntries))
 	}
 }
 

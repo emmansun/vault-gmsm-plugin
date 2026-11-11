@@ -453,6 +453,21 @@ jobs:
         curl -fsS -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/$PKI_MOUNT/ca/pem" \
           | grep -q 'BEGIN CERTIFICATE' || fail "ca/pem is not a PEM certificate"
 
+        # Each authority is reachable on its own, which is what a client that
+        # pins the one it trusts uses; the mount-level ca paths are the shorthand
+        # for whichever authority signs now. The document form is what an
+        # operator reads to reproduce an authority elsewhere.
+        issuer_id=$(vault read -field=issuer_id "$PKI_MOUNT/ca")
+        [ -n "$issuer_id" ] || fail "ca names no authority"
+        vault read -format=json "$PKI_MOUNT/issuer/$issuer_id/json" > "$RUNNER_TEMP/issuer.json"
+        expect "issuer/:ref/json reports the serial of the authority" "$root_serial" \
+          "$(jq -r '.data.serial_number // empty' "$RUNNER_TEMP/issuer.json")"
+        curl -fsS -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/$PKI_MOUNT/issuer/$issuer_id/pem" \
+          | grep -q 'BEGIN CERTIFICATE' || fail "issuer/:ref/pem is not a PEM certificate"
+        curl -fsS -o "$RUNNER_TEMP/issuer.der" -H "X-Vault-Token: $VAULT_TOKEN" \
+          "$VAULT_ADDR/v1/$PKI_MOUNT/issuer/$issuer_id/der"
+        [ -s "$RUNNER_TEMP/issuer.der" ] || fail "issuer/:ref/der is empty"
+
         if second=$(vault write "$PKI_MOUNT/root/generate/internal" common_name="Second Root" 2>&1); then
           fail "a second authority was generated in the same mount"
         fi
@@ -517,6 +532,31 @@ jobs:
         expect "the listing holds the serial" "$leaf_serial" \
           "$(vault list -format=json "$PKI_MOUNT/certs" | jq -r '.[0]')"
 
+        # The same role is reachable through the authority it names, which is how
+        # a service pins the authority it issues from.
+        vault write -format=json "$PKI_MOUNT/issuer/$issuer_id/issue/web" \
+          common_name=direct.example.com > "$RUNNER_TEMP/direct.json"
+        jq -r '.data.certificate' "$RUNNER_TEMP/direct.json" > "$RUNNER_TEMP/direct.pem"
+        jq -r '.data.issuing_ca' "$RUNNER_TEMP/direct.json" > "$RUNNER_TEMP/direct-ca.pem"
+        go run ./scripts/ci/pkicheck -cert "$RUNNER_TEMP/direct.pem" -ca "$RUNNER_TEMP/direct-ca.pem" \
+          || fail "the per-issuer path issued a certificate that does not verify"
+        expect "the per-issuer path reports the authority it used" "$issuer_id" \
+          "$(jq -r '.data.issuer_id // empty' "$RUNNER_TEMP/direct.json")"
+
+        # A profile is a role written down: the policy its certificates state and
+        # the deadline they may not pass. The deadline is two hours away, so the
+        # twenty-four hour ttl is shortened to it and the certificate is checked
+        # against both.
+        deadline=$(date -u -d '+2 hours' +%Y-%m-%dT%H:%M:%SZ)
+        vault write "$PKI_MOUNT/roles/profiled" allowed_domains=example.com allow_subdomains=true \
+          ttl=24h max_ttl=720h not_after="$deadline" policy_identifiers=2.23.140.1.2.1 > /dev/null
+        vault write -format=json "$PKI_MOUNT/issue/profiled" \
+          common_name=profiled.example.com > "$RUNNER_TEMP/profiled.json"
+        jq -r '.data.certificate' "$RUNNER_TEMP/profiled.json" > "$RUNNER_TEMP/profiled.pem"
+        go run ./scripts/ci/pkicheck -cert "$RUNNER_TEMP/profiled.pem" -ca "$RUNNER_TEMP/ca.pem" \
+          -policy 2.23.140.1.2.1 -not-after "$deadline" \
+          || fail "the certificate does not carry the profile of its role"
+
         # Revocation is recorded on the certificate and reaches the CRL. The
         # reason is part of what is recorded, because a client that sees a
         # compromise acts on it while a superseded certificate is only replaced.
@@ -552,6 +592,44 @@ jobs:
         vault write -f "$PKI_MOUNT/crl/rotate" > /dev/null
         expect "rotating the CRL increments its number" "$((crl_number + 1))" \
           "$(vault read -field=number "$PKI_MOUNT/crl")"
+
+        # A delta is relative to a full list: the answer names the base, and the
+        # indicator extension of the signed list carries it, so a client can tell
+        # which full list a delta applies to. The base is signed first, then a
+        # certificate of that authority is revoked, so the delta carries what the
+        # full list on its own would not. Reads are told not to sign lists here,
+        # which is how a mount that rotates on a schedule is run: every list in
+        # this part of the walkthrough is the one that was asked for.
+        vault write "$PKI_MOUNT/config/crl" auto_rebuild=false > /dev/null
+        expect "config/crl keeps the rebuild policy" false \
+          "$(vault read -field=auto_rebuild "$PKI_MOUNT/config/crl")"
+
+        vault write -f "$PKI_MOUNT/crl/rotate" > /dev/null
+        base_number=$(vault read -field=number "$PKI_MOUNT/crl")
+        [ -n "$base_number" ] || fail "the rotated list reports no number"
+
+        vault write -format=json "$PKI_MOUNT/issue/web" common_name=delta.example.com \
+          > "$RUNNER_TEMP/delta.json"
+        delta_serial=$(jq -r '.data.serial_number // empty' "$RUNNER_TEMP/delta.json")
+        [ -n "$delta_serial" ] || fail "issue returned no serial: $(cat "$RUNNER_TEMP/delta.json")"
+        vault write "$PKI_MOUNT/revoke" serial_number="$delta_serial" revocation_reason=4 > /dev/null
+
+        vault write -f "$PKI_MOUNT/crl/rotate-delta" > /dev/null
+        expect "the delta follows the full list that was signed" "$base_number" \
+          "$(vault read -field=base_number "$PKI_MOUNT/crl/delta")"
+
+        curl -fsS -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/$PKI_MOUNT/crl/delta/pem" \
+          > "$RUNNER_TEMP/delta-crl.pem"
+        go run ./scripts/ci/pkicheck -crl "$RUNNER_TEMP/delta-crl.pem" -ca "$RUNNER_TEMP/ca.pem" \
+          -base "$base_number" -serial "$delta_serial" -reason 4 \
+          || fail "the delta does not carry the revocation recorded since its base"
+
+        delta_type=$(curl -fsS -o "$RUNNER_TEMP/delta-crl.der" -w '%{content_type}' \
+          -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/$PKI_MOUNT/crl/delta/der")
+        case $delta_type in
+          application/pkix-crl*) ;;
+          *) fail "crl/delta/der answered with content type '$delta_type'" ;;
+        esac
 
         # The distribution point the certificates will name is stored and read back.
         vault write "$PKI_MOUNT/config/urls" \
@@ -627,6 +705,29 @@ jobs:
         vault write -f "$PKI_MOUNT/issuer/$previous_id/default" > /dev/null
         expect "the mount signs with the authority it was given" "$previous_id" \
           "$(vault read -field=issuer_id "$PKI_MOUNT/ca")"
+
+        # What an authority may do is part of its record. Narrowing one is what an
+        # operator does before retiring it: it keeps its key and its history and
+        # signs nothing it is no longer allowed to.
+        vault write "$PKI_MOUNT/issuer/$rotated_id" usage=read-only > /dev/null
+        expect "issuer/:ref keeps the usage it was given" read-only \
+          "$(vault read -format=json "$PKI_MOUNT/issuer/$rotated_id" | jq -r '.data.usage | join(",")')"
+
+        if out=$(vault write "$PKI_MOUNT/issuer/$rotated_id/issue/web" common_name=denied.example.com 2>&1); then
+          fail "an authority that may only be read issued a certificate"
+        fi
+        case $out in
+          *"is not allowed to issue certificates"*) ;;
+          *) fail "the refusal to issue was reported as: $out" ;;
+        esac
+
+        if out=$(vault write -f "$PKI_MOUNT/issuer/$rotated_id/crl/rotate" 2>&1); then
+          fail "an authority that may only be read signed a revocation list"
+        fi
+        case $out in
+          *"is not allowed to sign a revocation list"*) ;;
+          *) fail "the refusal of a list was reported as: $out" ;;
+        esac
 
     - name: Dump Vault server log
       if: always()

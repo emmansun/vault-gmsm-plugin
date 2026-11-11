@@ -194,15 +194,25 @@ type certEntry struct {
 // revocationEntry records when a serial was revoked and why. It is the only
 // input the CRL is built from, which is why a certificate the mount did not
 // store can still be revoked. The expiration is copied from the certificate
-// record when there is one, so tidy can drop the entry once the CRL entry has
-// aged out. The reason is a code of RFC 5280, and zero means unspecified, which
-// is what a caller that names no reason asks for.
+// record when there is one, so a list stops naming the serial once the
+// certificate can no longer be presented, and tidy can drop the record itself
+// afterwards. The reason is a code of RFC 5280, and zero means unspecified,
+// which is what a caller that names no reason asks for.
 type revocationEntry struct {
 	IssuerID       string `json:"issuer_id"`
 	RevocationTime int64  `json:"revocation_time"`
 	RFC3339        string `json:"revocation_time_rfc3339"`
 	Expiration     int64  `json:"expiration,omitempty"`
 	Reason         int    `json:"reason,omitempty"`
+}
+
+// hasExpired says whether the certificate this revocation names is past its
+// expiration, which is what lets a list leave the serial out: a client rejects
+// such a certificate on its dates without asking whether it was revoked. A
+// record that states no expiration is kept, because the certificate behind it
+// may still be presented.
+func (r *revocationEntry) hasExpired(now time.Time) bool {
+	return r.Expiration != 0 && !time.Unix(r.Expiration, 0).After(now)
 }
 
 // crlEntry caches a signed list. The DER has to be kept: an SM2 signature is

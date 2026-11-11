@@ -8,13 +8,16 @@
 // Usage:
 //
 //	pkicheck -cert leaf.pem -ca ca.pem
+//	pkicheck -cert leaf.pem -ca ca.pem -policy 2.23.140.1.2.1 -not-after 2030-01-01T00:00:00Z
 //	pkicheck -request -cert leaf.pem -ca ca.pem
 //	pkicheck -response -ca ca.pem -status good < answer.der
 //	pkicheck -response -ca ca.pem -status revoked -reason 1 < answer.der
 //	pkicheck -crl old.pem -ca old-ca.pem -serial 1F:2C:0E -reason 1
+//	pkicheck -crl delta.pem -ca old-ca.pem -base 7 -serial 1F:2C:0E
 package main
 
 import (
+	"encoding/asn1"
 	"encoding/base64"
 	"encoding/pem"
 	"errors"
@@ -40,6 +43,9 @@ func main() {
 	serial := flag.String("serial", "", "with -crl, the serial the list must name")
 	absent := flag.Bool("absent", false, "with -crl, the serial must not be named")
 	reason := flag.Int("reason", -1, "with -crl or -response, the reason code the revocation must state")
+	base := flag.String("base", "", "with -crl, the number of the full list a delta must follow")
+	deadline := flag.String("not-after", "", "with -cert, the latest RFC 3339 time the certificate may be valid until")
+	policy := flag.String("policy", "", "with -cert, a certificate policy the certificate must state")
 	flag.Parse()
 
 	var err error
@@ -47,13 +53,13 @@ func main() {
 	case *ask && *answer:
 		err = errors.New("choose one of -request and -response")
 	case *crlPath != "":
-		err = checkCRL(*crlPath, *caPath, *serial, *absent, *reason)
+		err = checkCRL(*crlPath, *caPath, *serial, *absent, *reason, *base)
 	case *ask:
 		err = printRequest(*certPath, *caPath)
 	case *answer:
 		err = checkResponse(os.Stdin, *caPath, *want, *reason)
 	default:
-		err = run(*certPath, *caPath)
+		err = run(*certPath, *caPath, *deadline, *policy)
 	}
 
 	if err != nil {
@@ -137,7 +143,7 @@ func checkResponse(answer io.Reader, caPath, want string, reason int) error {
 // checkCRL verifies that a list was signed by the authority that should have
 // signed it, and says whether it names one serial. The signature is what a
 // client checks, so a list nothing verified would pass whatever it contained.
-func checkCRL(path, caPath, serial string, absent bool, reason int) error {
+func checkCRL(path, caPath, serial string, absent bool, reason int, base string) error {
 	if caPath == "" {
 		return errors.New("-ca is required")
 	}
@@ -164,6 +170,11 @@ func checkCRL(path, caPath, serial string, absent bool, reason int) error {
 	}
 	if err := list.CheckSignatureFrom(ca); err != nil {
 		return fmt.Errorf("the list is not signed by the authority: %w", err)
+	}
+	if base != "" {
+		if err := checkDeltaBase(list, base); err != nil {
+			return err
+		}
 	}
 
 	if serial != "" {
@@ -204,6 +215,36 @@ func checkCRL(path, caPath, serial string, absent bool, reason int) error {
 	return nil
 }
 
+// oidDeltaCRLIndicator is the extension that names the full list a delta is
+// applied to. A client that does not see it has nothing to apply the list to.
+var oidDeltaCRLIndicator = asn1.ObjectIdentifier{2, 5, 29, 27}
+
+// checkDeltaBase says whether a delta follows the full list it is expected to.
+func checkDeltaBase(list *smx509.RevocationList, base string) error {
+	wanted, ok := new(big.Int).SetString(base, 10)
+	if !ok {
+		return fmt.Errorf("the base %q is not a number", base)
+	}
+
+	for _, ext := range list.Extensions {
+		if !ext.Id.Equal(oidDeltaCRLIndicator) {
+			continue
+		}
+
+		var named *big.Int
+		if _, err := asn1.Unmarshal(ext.Value, &named); err != nil {
+			return fmt.Errorf("the delta indicator cannot be read: %w", err)
+		}
+		if named.Cmp(wanted) != 0 {
+			return fmt.Errorf("the delta follows list %v, want %s", named, base)
+		}
+
+		return nil
+	}
+
+	return errors.New("the list carries no delta indicator")
+}
+
 // parseSerial reads a serial the way the API reports it, colon separated and in
 // either case, and answers with the number the list is compared against.
 func parseSerial(text string) (*big.Int, error) {
@@ -220,7 +261,7 @@ func parseSerial(text string) (*big.Int, error) {
 	return serial, nil
 }
 
-func run(certPath, caPath string) error {
+func run(certPath, caPath, deadline, policy string) error {
 	if certPath == "" || caPath == "" {
 		return errors.New("both -cert and -ca are required")
 	}
@@ -255,11 +296,59 @@ func run(certPath, caPath string) error {
 		return fmt.Errorf("the certificate is not valid now: %s to %s",
 			leaf.NotBefore.Format(time.RFC3339), leaf.NotAfter.Format(time.RFC3339))
 	}
+	if deadline != "" {
+		latest, err := time.Parse(time.RFC3339, deadline)
+		if err != nil {
+			return fmt.Errorf("the deadline %q is not an RFC 3339 time: %w", deadline, err)
+		}
+		if leaf.NotAfter.After(latest) {
+			return fmt.Errorf("the certificate is valid until %s, past the deadline %s",
+				leaf.NotAfter.Format(time.RFC3339), latest.Format(time.RFC3339))
+		}
+	}
+	if policy != "" && !carriesPolicy(leaf, policy) {
+		return fmt.Errorf("the certificate states the policies %v, want %s", statedPolicies(leaf), policy)
+	}
 
 	fmt.Printf("%s issued by %s, serial %x, valid until %s\n",
 		leaf.Subject.CommonName, ca.Subject.CommonName, leaf.SerialNumber, leaf.NotAfter.Format(time.RFC3339))
 
 	return nil
+}
+
+// statedPolicies returns the certificate policies a certificate carries, once
+// each. A parse fills both the field that holds the OIDs as they were written
+// and the one that holds them as integers, so the two are read and compared by
+// their dotted form.
+func statedPolicies(cert *smx509.Certificate) []string {
+	stated := make([]string, 0, len(cert.Policies)+len(cert.PolicyIdentifiers))
+	seen := make(map[string]bool, cap(stated))
+	add := func(oid string) {
+		if seen[oid] {
+			return
+		}
+		seen[oid] = true
+		stated = append(stated, oid)
+	}
+
+	for _, oid := range cert.Policies {
+		add(oid.String())
+	}
+	for _, oid := range cert.PolicyIdentifiers {
+		add(oid.String())
+	}
+
+	return stated
+}
+
+func carriesPolicy(cert *smx509.Certificate, wanted string) bool {
+	for _, oid := range statedPolicies(cert) {
+		if oid == wanted {
+			return true
+		}
+	}
+
+	return false
 }
 
 func readCertificate(path string) (*smx509.Certificate, error) {

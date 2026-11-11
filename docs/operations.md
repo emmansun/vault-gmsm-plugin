@@ -112,6 +112,17 @@ difference is recorded, by naming the plugin that changed.
 - **The CRL is signed lazily.** A revocation marks the cached CRL dirty and the
   next read rebuilds it, so an unused mount never pays for a signature it did
   not ask for.
+- **A revocation list drops a certificate once it expires.** The list names the
+  certificates a client may still be shown, so entries of expired certificates
+  leave it at the next signature and the list does not grow between tidies. The
+  records behind them are kept, and `tidy` is what removes those: schedule it,
+  nightly for a mount that issues every day and weekly for one whose
+  certificates live for weeks, or the mount keeps every certificate it ever
+  issued.
+- **Signing runs beside signing in the pki plugin.** Certificates, lists and
+  answers are signed under a shared read lock, so requests that only sign do
+  not queue behind each other; a revocation, a rotation or an import is what
+  takes the lock for itself.
 
 ## Development
 

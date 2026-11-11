@@ -188,8 +188,12 @@ func (b *backend) ocspIssuer(ctx context.Context, s logical.Storage, request *oc
 }
 
 // signOCSPResponse answers with the authority that signed the certificate the
-// request names.
+// request names. Answering signs but changes nothing, so it holds the read lock
+// and waits only for a change of the authority it is answering about.
 func (b *backend) signOCSPResponse(ctx context.Context, s logical.Storage, issuer *issuerEntry, request *ocspRequest) ([]byte, error) {
+	b.caMu.RLock()
+	defer b.caMu.RUnlock()
+
 	cert, err := issuer.certificate()
 	if err != nil {
 		return nil, err

@@ -157,5 +157,7 @@ const pathTidyHelpDesc = `
 Drops the records of certificates that expired longer than the safety buffer
 ago, and the revocations that name them, so the mount does not grow forever. A
 revocation whose certificate is still valid, or whose expiration is not known,
-is kept. The certificate revocation list is rebuilt on the next read.
+is kept. The certificate revocation list is rebuilt on the next read; it already
+leaves out a certificate once it has expired, and tidy removes the records that
+are left behind.
 `

@@ -412,8 +412,8 @@ func (b *backend) pathRootSignIntermediateWrite(ctx context.Context, req *logica
 		return logical.ErrorResponse(err.Error()), logical.ErrInvalidRequest
 	}
 
-	b.caMu.Lock()
-	defer b.caMu.Unlock()
+	b.caMu.RLock()
+	defer b.caMu.RUnlock()
 
 	issuer, chain, resp, err := b.caBundle(ctx, req.Storage)
 	if resp != nil || err != nil {

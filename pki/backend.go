@@ -121,9 +121,13 @@ func Backend(ctx context.Context, conf *logical.BackendConfig) (*backend, error)
 type backend struct {
 	*framework.Backend
 
-	// caMu serialises the operations that read a record, decide, and write it
-	// back: creating the issuer, revoking a certificate and rebuilding the CRL.
+	// caMu keeps the operations that read a record, decide, and write it back —
+	// creating the issuer, revoking a certificate, rebuilding a list — from
+	// interleaving. It is read-write because signing changes none of them: a
+	// certificate, a list or an answer is signed under the read lock, so two
+	// requests that only sign run beside each other, and only a change of the
+	// authority or of what a list is built from takes the lock for itself.
 	// Vault sends writes to the active node only, so one lock per mount is
 	// enough and cheaper to reason about than a lock per record.
-	caMu sync.Mutex
+	caMu sync.RWMutex
 }
