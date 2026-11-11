@@ -694,8 +694,11 @@ jobs:
         if out=$(vault delete "$PKI_MOUNT/issuer/$previous_id" 2>&1); then
           fail "an authority with a live certificate was retired"
         fi
+        # The refusal says which certificates keep the authority alive, in the
+        # singular or the plural depending on how many there are, so only the
+        # part both forms share is matched.
         case $out in
-          *"has not expired"*) ;;
+          *"not expired"*) ;;
           *) fail "the retirement was refused as: $out" ;;
         esac
 

@@ -240,12 +240,20 @@ func TestDeleteIssuerWaitsForItsCertificates(t *testing.T) {
 
 	mustRefuse(t, b, storage, logical.DeleteOperation, "issuer/"+id, nil, "has not expired")
 
+	// The refusal names what keeps the authority alive, and a caller matches on
+	// that wording: the plural is what an authority with more than one live
+	// certificate answers with, so both forms are pinned here.
+	mustWrite(t, b, storage, "issue/web", map[string]interface{}{
+		"common_name": "other.example.com",
+	})
+	mustRefuse(t, b, storage, logical.DeleteOperation, "issuer/"+id, nil, "certificates that have not expired")
+
 	// Retiring the authority is what removes the list that would have reported
 	// the revocation of its certificates, so it has to outlive them.
 	expireCertificates(t, b, storage)
 
 	resp := mustDelete(t, b, storage, "issuer/"+id)
-	if resp.Data["certificates_removed"] != 1 {
+	if resp.Data["certificates_removed"] != 2 {
 		t.Fatalf("the retirement removed %v certificates", resp.Data["certificates_removed"])
 	}
 	if resp.Data["default_issuer_id"] != "" {
