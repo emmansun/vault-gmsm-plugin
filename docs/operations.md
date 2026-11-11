@@ -152,5 +152,5 @@ certificate and `uid` checks, and runs the REST test against the same server.
 an authority, writes a role, issues a certificate and verifies it with
 `scripts/ci/pkicheck`, asks the responder about the certificate while it is good
 and again once it is revoked, reads the CRL back in each of its three forms,
-runs `tidy`, and finishes by rotating the authority and switching back to the
-one that signed the certificate.
+runs `tidy`, rotates the authority, verifies that the authority it replaced
+still publishes the list that names the revocation, and switches back to it.

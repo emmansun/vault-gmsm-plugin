@@ -575,6 +575,26 @@ jobs:
         expect "the mount signs with the new authority" "$rotated_id" \
           "$(vault read -field=issuer_id "$PKI_MOUNT/ca")"
 
+        # The authority that signed the leaf keeps publishing a list of its own,
+        # and that list is the only one that names the revocation. Each list is
+        # checked by verifying its signature against the authority that signed it.
+        vault read -format=json "$PKI_MOUNT/issuer/$previous_id" > "$RUNNER_TEMP/previous.json"
+        jq -r '.data.certificate' "$RUNNER_TEMP/previous.json" > "$RUNNER_TEMP/previous-ca.pem"
+        vault read -format=json "$PKI_MOUNT/issuer/$rotated_id" > "$RUNNER_TEMP/rotated-issuer.json"
+        jq -r '.data.certificate' "$RUNNER_TEMP/rotated-issuer.json" > "$RUNNER_TEMP/rotated-ca.pem"
+
+        curl -fsS -H "X-Vault-Token: $VAULT_TOKEN" \
+          "$VAULT_ADDR/v1/$PKI_MOUNT/issuer/$previous_id/crl/pem" > "$RUNNER_TEMP/previous-crl.pem"
+        go run ./scripts/ci/pkicheck -crl "$RUNNER_TEMP/previous-crl.pem" \
+          -ca "$RUNNER_TEMP/previous-ca.pem" -serial "$leaf_serial" \
+          || fail "the list of the previous authority does not name the revoked certificate"
+
+        curl -fsS -H "X-Vault-Token: $VAULT_TOKEN" \
+          "$VAULT_ADDR/v1/$PKI_MOUNT/crl/pem" > "$RUNNER_TEMP/current-crl.pem"
+        go run ./scripts/ci/pkicheck -crl "$RUNNER_TEMP/current-crl.pem" \
+          -ca "$RUNNER_TEMP/rotated-ca.pem" -serial "$leaf_serial" -absent \
+          || fail "the list of the new authority names a certificate it did not sign"
+
         if out=$(vault delete "$PKI_MOUNT/issuer/$previous_id" 2>&1); then
           fail "an authority with a live certificate was retired"
         fi

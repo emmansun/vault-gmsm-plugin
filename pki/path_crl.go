@@ -94,8 +94,153 @@ func (b *backend) pathCRLRotate() *framework.Path {
 	}
 }
 
+// pathIssuerCRL serves the list of one authority, addressed the way issuer/:ref
+// is: by identifier, by name, or as default. A rotated mount needs it, because
+// the certificates of the authority it replaced point at a list of their own,
+// and crl answers only for the one that signs now.
+func (b *backend) pathIssuerCRL() *framework.Path {
+	return &framework.Path{
+		Pattern: "issuer/" + framework.GenericNameRegex("ref") + "/crl$",
+
+		DisplayAttrs: &framework.DisplayAttributes{
+			OperationPrefix: operationPrefix + "-issuers",
+			OperationVerb:   "read",
+			OperationSuffix: "issuer-crl",
+		},
+
+		Fields: map[string]*framework.FieldSchema{
+			"ref": {
+				Type:        framework.TypeString,
+				Description: `Identifier or name of the issuer whose list is read, or "default" for the one this mount signs with.`,
+			},
+		},
+
+		Callbacks: map[logical.Operation]framework.OperationFunc{
+			logical.ReadOperation: b.pathIssuerCRLRead,
+		},
+
+		HelpSynopsis:    pathIssuerCRLHelpSyn,
+		HelpDescription: pathIssuerCRLHelpDesc,
+	}
+}
+
+func (b *backend) pathIssuerCRLPEM() *framework.Path {
+	return &framework.Path{
+		Pattern: "issuer/" + framework.GenericNameRegex("ref") + "/crl/pem$",
+
+		DisplayAttrs: &framework.DisplayAttributes{
+			OperationPrefix: operationPrefix + "-issuers",
+			OperationVerb:   "read",
+			OperationSuffix: "issuer-crl-pem",
+		},
+
+		Fields: map[string]*framework.FieldSchema{
+			"ref": {
+				Type:        framework.TypeString,
+				Description: `Identifier or name of the issuer whose list is read, or "default" for the one this mount signs with.`,
+			},
+		},
+
+		Callbacks: map[logical.Operation]framework.OperationFunc{
+			logical.ReadOperation: b.pathIssuerCRLPEMRead,
+		},
+
+		HelpSynopsis:    pathIssuerCRLHelpSyn,
+		HelpDescription: pathIssuerCRLHelpDesc,
+	}
+}
+
+func (b *backend) pathIssuerCRLDER() *framework.Path {
+	return &framework.Path{
+		Pattern: "issuer/" + framework.GenericNameRegex("ref") + "/crl/der$",
+
+		DisplayAttrs: &framework.DisplayAttributes{
+			OperationPrefix: operationPrefix + "-issuers",
+			OperationVerb:   "read",
+			OperationSuffix: "issuer-crl-der",
+		},
+
+		Fields: map[string]*framework.FieldSchema{
+			"ref": {
+				Type:        framework.TypeString,
+				Description: `Identifier or name of the issuer whose list is read, or "default" for the one this mount signs with.`,
+			},
+		},
+
+		Callbacks: map[logical.Operation]framework.OperationFunc{
+			logical.ReadOperation: b.pathIssuerCRLDERRead,
+		},
+
+		HelpSynopsis:    pathIssuerCRLHelpSyn,
+		HelpDescription: pathIssuerCRLHelpDesc,
+	}
+}
+
+// pathIssuerCRLRotate is the same forced rebuild for one authority: it signs a
+// new list of that issuer under the next number of that issuer.
+func (b *backend) pathIssuerCRLRotate() *framework.Path {
+	return &framework.Path{
+		Pattern: "issuer/" + framework.GenericNameRegex("ref") + "/crl/rotate$",
+
+		DisplayAttrs: &framework.DisplayAttributes{
+			OperationPrefix: operationPrefix + "-issuers",
+			OperationVerb:   "rotate",
+			OperationSuffix: "issuer-crl",
+		},
+
+		Fields: map[string]*framework.FieldSchema{
+			"ref": {
+				Type:        framework.TypeString,
+				Description: `Identifier or name of the issuer whose list is rebuilt, or "default" for the one this mount signs with.`,
+			},
+		},
+
+		Callbacks: map[logical.Operation]framework.OperationFunc{
+			logical.UpdateOperation: b.pathIssuerCRLRotateWrite,
+		},
+
+		HelpSynopsis:    pathIssuerCRLRotateHelpSyn,
+		HelpDescription: pathIssuerCRLHelpDesc,
+	}
+}
+
 func (b *backend) pathCRLRead(ctx context.Context, req *logical.Request, _ *framework.FieldData) (*logical.Response, error) {
-	entry, resp, err := b.crlForRead(ctx, req.Storage)
+	return b.crlJSON(ctx, req.Storage, issuerRefDefault)
+}
+
+func (b *backend) pathCRLPEMRead(ctx context.Context, req *logical.Request, _ *framework.FieldData) (*logical.Response, error) {
+	return b.crlPEM(ctx, req.Storage, issuerRefDefault)
+}
+
+func (b *backend) pathCRLDERRead(ctx context.Context, req *logical.Request, _ *framework.FieldData) (*logical.Response, error) {
+	return b.crlDER(ctx, req.Storage, issuerRefDefault)
+}
+
+func (b *backend) pathCRLRotateWrite(ctx context.Context, req *logical.Request, _ *framework.FieldData) (*logical.Response, error) {
+	return b.crlRotate(ctx, req.Storage, issuerRefDefault)
+}
+
+// The four handlers below answer the same way for the authority the path names,
+// which is what a mount that has rotated needs: the certificates it signed keep
+// pointing at a list that belongs to them.
+func (b *backend) pathIssuerCRLRead(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+	return b.crlJSON(ctx, req.Storage, d.Get("ref").(string))
+}
+
+func (b *backend) pathIssuerCRLPEMRead(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+	return b.crlPEM(ctx, req.Storage, d.Get("ref").(string))
+}
+
+func (b *backend) pathIssuerCRLDERRead(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+	return b.crlDER(ctx, req.Storage, d.Get("ref").(string))
+}
+
+func (b *backend) pathIssuerCRLRotateWrite(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+	return b.crlRotate(ctx, req.Storage, d.Get("ref").(string))
+}
+
+func (b *backend) crlJSON(ctx context.Context, s logical.Storage, ref string) (*logical.Response, error) {
+	entry, resp, err := b.crlForRead(ctx, s, ref)
 	if resp != nil || err != nil {
 		return resp, err
 	}
@@ -108,8 +253,8 @@ func (b *backend) pathCRLRead(ctx context.Context, req *logical.Request, _ *fram
 	}}, nil
 }
 
-func (b *backend) pathCRLPEMRead(ctx context.Context, req *logical.Request, _ *framework.FieldData) (*logical.Response, error) {
-	entry, resp, err := b.crlForRead(ctx, req.Storage)
+func (b *backend) crlPEM(ctx context.Context, s logical.Storage, ref string) (*logical.Response, error) {
+	entry, resp, err := b.crlForRead(ctx, s, ref)
 	if resp != nil || err != nil {
 		return resp, err
 	}
@@ -121,8 +266,8 @@ func (b *backend) pathCRLPEMRead(ctx context.Context, req *logical.Request, _ *f
 	}}, nil
 }
 
-func (b *backend) pathCRLDERRead(ctx context.Context, req *logical.Request, _ *framework.FieldData) (*logical.Response, error) {
-	entry, resp, err := b.crlForRead(ctx, req.Storage)
+func (b *backend) crlDER(ctx context.Context, s logical.Storage, ref string) (*logical.Response, error) {
+	entry, resp, err := b.crlForRead(ctx, s, ref)
 	if resp != nil || err != nil {
 		return resp, err
 	}
@@ -134,24 +279,21 @@ func (b *backend) pathCRLDERRead(ctx context.Context, req *logical.Request, _ *f
 	}}, nil
 }
 
-func (b *backend) pathCRLRotateWrite(ctx context.Context, req *logical.Request, _ *framework.FieldData) (*logical.Response, error) {
+func (b *backend) crlRotate(ctx context.Context, s logical.Storage, ref string) (*logical.Response, error) {
 	b.caMu.Lock()
 	defer b.caMu.Unlock()
 
-	issuer, err := b.issuer(ctx, req.Storage)
-	if err != nil {
-		return nil, err
-	}
-	if issuer == nil {
-		return logical.ErrorResponse(errNoIssuer.Error()), logical.ErrInvalidRequest
+	issuer, resp, err := b.crlIssuer(ctx, s, ref)
+	if err != nil || resp != nil {
+		return resp, err
 	}
 
-	previous, err := b.currentCRL(ctx, req.Storage, issuer.ID)
+	previous, err := b.currentCRL(ctx, s, issuer.ID)
 	if err != nil {
 		return nil, err
 	}
 
-	entry, err := b.buildCRL(ctx, req.Storage, issuer, previous)
+	entry, err := b.buildCRL(ctx, s, issuer, previous)
 	if err != nil {
 		return nil, err
 	}
@@ -163,18 +305,16 @@ func (b *backend) pathCRLRotateWrite(ctx context.Context, req *logical.Request, 
 	}}, nil
 }
 
-// crlForRead answers with a usable list, rebuilding the cached one when it is
-// missing, stale or marks a revocation that arrived since it was signed.
-func (b *backend) crlForRead(ctx context.Context, s logical.Storage) (*crlEntry, *logical.Response, error) {
+// crlForRead answers with a usable list of one authority, rebuilding the cached
+// one when it is missing, stale or marks a revocation that arrived since it was
+// signed.
+func (b *backend) crlForRead(ctx context.Context, s logical.Storage, ref string) (*crlEntry, *logical.Response, error) {
 	b.caMu.Lock()
 	defer b.caMu.Unlock()
 
-	issuer, err := b.issuer(ctx, s)
-	if err != nil {
-		return nil, nil, err
-	}
-	if issuer == nil {
-		return nil, logical.ErrorResponse(errNoIssuer.Error()), logical.ErrInvalidRequest
+	issuer, resp, err := b.crlIssuer(ctx, s, ref)
+	if err != nil || resp != nil {
+		return nil, resp, err
 	}
 
 	cached, err := b.currentCRL(ctx, s, issuer.ID)
@@ -191,6 +331,21 @@ func (b *backend) crlForRead(ctx context.Context, s logical.Storage) (*crlEntry,
 	}
 
 	return entry, nil, nil
+}
+
+// crlIssuer resolves the authority whose list is asked for: the one the path
+// names, or the one this mount signs with. A mount that has rotated holds more
+// than one, and each list speaks only for the certificates of its own issuer.
+func (b *backend) crlIssuer(ctx context.Context, s logical.Storage, ref string) (*issuerEntry, *logical.Response, error) {
+	_, issuer, err := b.issuerByRef(ctx, s, ref)
+	if err != nil {
+		return nil, logical.ErrorResponse(err.Error()), logical.ErrInvalidRequest
+	}
+	if issuer == nil {
+		return nil, logical.ErrorResponse(errNoIssuer.Error()), logical.ErrInvalidRequest
+	}
+
+	return issuer, nil, nil
 }
 
 // markCRLDirty records that a revocation arrived after the cached list of this
@@ -312,3 +467,18 @@ const pathCRLRotateHelpDesc = `
 Signs a new list with the next number and a fresh validity, whether or not
 anything changed. A client that watches the number sees the rotation.
 `
+
+const pathIssuerCRLHelpSyn = `Read the list of one issuer`
+
+const pathIssuerCRLHelpDesc = `
+Answers with the certificate revocation list of one authority of the mount, in
+the same three forms as crl: JSON, PEM and DER. The list names only the
+revocations of that authority, because a serial another one signed has nothing
+to do with it, and it is numbered on its own.
+
+A mount that has rotated keeps answering for the authority it replaced, which
+is what lets the certificates of that authority be checked with the list that
+can speak for them. Retiring the authority takes its list away.
+`
+
+const pathIssuerCRLRotateHelpSyn = `Rebuild the list of one issuer`

@@ -96,8 +96,9 @@ previous_issuer_id  c8f1…
 
 The mount signs with the new authority from then on. The old one answers on
 `issuer/:ref` and still signs for a role whose `issuer_ref` names it, which is
-what lets the certificates issued under it keep their own authority for as long
-as they are valid. `issuer/:ref/default` moves the mount back to one of them:
+what lets the certificates issued under it keep their own authority — and their
+own list, on `issuer/:ref/crl` — for as long as they are valid.
+`issuer/:ref/default` moves the mount back to one of them:
 
 ```console
 $ vault write -f pki-gmsm/issuer/c8f1…/default
@@ -256,6 +257,8 @@ role sets `no_store`.
 | `crl` | the CRL as JSON: `certificate`, `number`, `this_update`, `next_update` |
 | `crl/pem`, `crl/der` | the same CRL as a raw body (`application/pem-encoding`, `application/pkix-crl`) |
 | `crl/rotate` | rebuilds the CRL under the next number |
+| `issuer/:ref/crl`, `/pem`, `/der` | the list of one authority, signed by it |
+| `issuer/:ref/crl/rotate` | rebuilds that authority's list under its own number |
 | `config/urls` | `issuing_certificates`, `crl_distribution_points`, `ocsp_servers` |
 | `tidy` | drops expired certificates and revocations |
 
@@ -268,6 +271,22 @@ client could cache it. Writing a revocation marks the cache dirty and the next
 read rebuilds it, so `revoke` alone never pays for a signature nobody asked for.
 `crl/rotate` forces a rebuild, and `tidy` is what keeps the revoked list from
 growing forever.
+
+A mount that has rotated holds more than one authority, and `crl` answers for
+the one it signs with. Each authority keeps a list of its own, and
+`issuer/:ref/crl` reads it, so a certificate signed before the rotation is
+checked against a list its own authority signed. Point `crl_distribution_points`
+at that form and update it after a rotation:
+
+```bash
+vault write pki-gmsm/config/urls \
+    crl_distribution_points="$VAULT_ADDR/v1/pki-gmsm/issuer/$ISSUER_ID/crl"
+```
+
+A certificate keeps naming the address that was current when it was signed, and
+that address keeps answering for as long as the mount holds the authority.
+Retiring the authority is what takes its list away, which is why that is refused
+while its certificates are still valid.
 
 `tidy` runs synchronously and answers with what it removed. It takes
 `safety_buffer` (72h), `tidy_cert_store` (off) and `tidy_revoked_certs` (on).

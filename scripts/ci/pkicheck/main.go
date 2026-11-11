@@ -10,6 +10,7 @@
 //	pkicheck -cert leaf.pem -ca ca.pem
 //	pkicheck -request -cert leaf.pem -ca ca.pem
 //	pkicheck -response -ca ca.pem -status good < answer.der
+//	pkicheck -crl old.pem -ca old-ca.pem -serial 1F:2C:0E
 package main
 
 import (
@@ -19,6 +20,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math/big"
 	"os"
 	"strings"
 	"time"
@@ -33,12 +35,17 @@ func main() {
 	ask := flag.Bool("request", false, "print the base64 OCSP request about the certificate instead")
 	answer := flag.Bool("response", false, "read a DER OCSP response from stdin and check it")
 	want := flag.String("status", "", "the status the response should report: good, revoked or unknown")
+	crlPath := flag.String("crl", "", "check the certificate revocation list at this path instead")
+	serial := flag.String("serial", "", "with -crl, the serial the list must name")
+	absent := flag.Bool("absent", false, "with -crl, the serial must not be named")
 	flag.Parse()
 
 	var err error
 	switch {
 	case *ask && *answer:
 		err = errors.New("choose one of -request and -response")
+	case *crlPath != "":
+		err = checkCRL(*crlPath, *caPath, *serial, *absent)
 	case *ask:
 		err = printRequest(*certPath, *caPath)
 	case *answer:
@@ -116,6 +123,86 @@ func checkResponse(answer io.Reader, caPath, want string) error {
 	}
 
 	return nil
+}
+
+// checkCRL verifies that a list was signed by the authority that should have
+// signed it, and says whether it names one serial. The signature is what a
+// client checks, so a list nothing verified would pass whatever it contained.
+func checkCRL(path, caPath, serial string, absent bool) error {
+	if caPath == "" {
+		return errors.New("-ca is required")
+	}
+
+	der, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	if block, _ := pem.Decode(der); block != nil {
+		der = block.Bytes
+	}
+
+	list, err := smx509.ParseRevocationList(der)
+	if err != nil {
+		return fmt.Errorf("%s is not a certificate revocation list: %w", path, err)
+	}
+
+	ca, err := readCertificate(caPath)
+	if err != nil {
+		return fmt.Errorf("could not read the authority: %w", err)
+	}
+	if err := list.CheckSignatureFrom(ca); err != nil {
+		return fmt.Errorf("the list is not signed by the authority: %w", err)
+	}
+
+	if serial != "" {
+		wanted, err := parseSerial(serial)
+		if err != nil {
+			return err
+		}
+
+		listed := false
+		for _, entry := range list.RevokedCertificateEntries {
+			if entry.SerialNumber.Cmp(wanted) == 0 {
+				listed = true
+				break
+			}
+		}
+
+		if absent && listed {
+			return fmt.Errorf("the list names %s, which it should not", serial)
+		}
+		if !absent && !listed {
+			return fmt.Errorf("the list does not name %s", serial)
+		}
+	}
+
+	fmt.Printf("list %v of %s names %d revoked certificates\n",
+		list.Number, ca.Subject.CommonName, len(list.RevokedCertificateEntries))
+	if serial != "" {
+		state := "is revoked"
+		if absent {
+			state = "is not named"
+		}
+		fmt.Printf("%s %s\n", serial, state)
+	}
+
+	return nil
+}
+
+// parseSerial reads a serial the way the API reports it, colon separated and in
+// either case, and answers with the number the list is compared against.
+func parseSerial(text string) (*big.Int, error) {
+	cleaned := strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(text), ":", ""))
+	if cleaned == "" {
+		return nil, errors.New("the serial is empty")
+	}
+
+	serial, ok := new(big.Int).SetString(cleaned, 16)
+	if !ok {
+		return nil, fmt.Errorf("the serial %q is not hexadecimal", text)
+	}
+
+	return serial, nil
 }
 
 func run(certPath, caPath string) error {
