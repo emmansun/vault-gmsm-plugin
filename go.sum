@@ -70,8 +70,8 @@ github.com/docker/go-connections v0.8.2 h1:9d9DEokx5W7qlr0shkFXIxEA7+TTD+llwzcyk
 github.com/docker/go-connections v0.8.2/go.mod h1:no1qkHdjq7kLMGUXYAduOhYPSJxxvgWBh7ogVvptn3Q=
 github.com/docker/go-units v0.5.0 h1:69rxXcBk27SvSaaxTtLh/8llcHD8vYHT7WSdRZ/jvr4=
 github.com/docker/go-units v0.5.0/go.mod h1:fgPhTUdO+D/Jk86RDLlptpiXQzgHJF7gydDDbaIK4Dk=
-github.com/emmansun/gmsm v0.45.2 h1:GUqMkdHDrEvxqcRtIfhkyqMzgwtiQsnCVYtioOdYlQc=
-github.com/emmansun/gmsm v0.45.2/go.mod h1:RfnfrzyB9XbDi73nF1NHbJeqJj+a6pg/pXr5lrZKMok=
+github.com/emmansun/gmsm v0.45.3 h1:HARYZrtG4JqFl4ZKwk01Oym1WnSPmafQME7TxuTaGYk=
+github.com/emmansun/gmsm v0.45.3/go.mod h1:RfnfrzyB9XbDi73nF1NHbJeqJj+a6pg/pXr5lrZKMok=
 github.com/envoyproxy/go-control-plane v0.9.0/go.mod h1:YTl/9mNaCwkRvm6d1a2C3ymFceY/DCBVvsKhRF0iEA4=
 github.com/envoyproxy/go-control-plane v0.9.1-0.20191026205805-5f8ba28d4473/go.mod h1:YTl/9mNaCwkRvm6d1a2C3ymFceY/DCBVvsKhRF0iEA4=
 github.com/envoyproxy/go-control-plane v0.9.4/go.mod h1:6rpuAdCZL397s3pYoYcLgu1mIlRU8Am5FuJP05cCM98=
